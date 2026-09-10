@@ -40,6 +40,85 @@ docker compose up --build
 
 常用环境变量见 `env.example`（对话走云端或 Ollama/vLLM、嵌入默认本地 BGE、混合检索与重排开关等）。
 
+### 依赖文件
+
+| 文件 | 用途 |
+|------|------|
+| `requirements.txt` | 跑服务（Docker 也只装这份） |
+| `requirements-dev.txt` | 开发 + 单元测试 |
+| `requirements-eval.txt` | 可选：RAGAS 评测与 PDF 转语料（体积大，按需安装） |
+
+## 测试
+
+```bash
+pip install -r requirements-dev.txt
+pytest                          # 离线测试，无需 API Key / 模型权重
+```
+
+针对**已启动的服务**做 HTTP 冒烟（真实嵌入 + 真实接口）：
+
+```bash
+python main.py                  # 另开终端
+python scripts/smoke_test.py    # 默认 http://127.0.0.1:8000
+```
+
+接入 LLM 前可先检查端点是否通：
+
+```bash
+python scripts/check_llm.py
+python scripts/check_llm.py --base-url http://192.168.1.10:11434/v1 --model qwen2.5:7b
+```
+
+首次使用本地嵌入/重排前，可预下载模型权重（避免首次索引时卡住）：
+
+```bash
+python scripts/download_model.py
+python scripts/download_model.py --reranker   # 重排模型约 1GB
+```
+
+## 评测
+
+公开示例数据在 `eval/corpus.example/` 与 `eval/questions.example.jsonl`，可直接跑通流程。
+
+**1. 召回消融（Hit@K / MRR，不调 LLM 生成）**
+
+```bash
+pip install -r requirements-dev.txt   # 已含主线依赖
+
+python scripts/validate_questions.py eval/questions.example.jsonl --corpus eval/corpus.example
+python scripts/retrieval_sweep.py --questions eval/questions.example.jsonl --corpus eval/corpus.example
+```
+
+**2. RAGAS（LLM 裁判，评检索与生成质量）**
+
+```bash
+pip install -r requirements-eval.txt
+
+# 只评检索类指标（省调用）
+python scripts/ragas_eval.py --questions eval/questions.example.jsonl \
+    --corpus eval/corpus.example --metrics context_precision,context_recall
+
+# 完整评测（需配置 .env 中的 LLM）
+python scripts/ragas_eval.py --questions eval/questions.example.jsonl --corpus eval/corpus.example
+```
+
+仅导出样本、不装 ragas 也可：
+
+```bash
+python scripts/ragas_eval.py --questions eval/questions.example.jsonl \
+    --corpus eval/corpus.example --dump-only
+```
+
+**3. 其他**
+
+| 命令 | 说明 |
+|------|------|
+| `python scripts/pdf_to_markdown.py 手册.pdf` | PDF 转可入库文本（评测语料准备） |
+| `python scripts/docker_verify.py` | Docker 部署后健康检查 |
+| `POST /api/retrieve` | 只检索不生成，便于调试召回 |
+
+本地若有完整语料与问题集（未上传 Git），把路径换成 `eval/corpus`、`eval/questions.hss.jsonl` 即可。详见 `eval/README.md`。
+
 ## 技术栈
 
 | 层次 | 选型 |
@@ -73,4 +152,4 @@ docker compose up --build
 | rerank | 0.755 | 0.804 |
 | hybrid + rerank | **0.782** | **0.869** |
 
-复现：`scripts/retrieval_sweep.py`（召回指标）、`scripts/ragas_eval.py`（RAGAS）。示例问题集见 `eval/questions.example.jsonl`，真实项目用到的数据集有敏感信息没有upload。
+复现命令见上文「评测」一节；完整 HSS 语料因敏感信息未上传仓库。
