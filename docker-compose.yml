@@ -1,0 +1,52 @@
+# 一键启动:
+#   copy env.docker.example .env   # 首次
+#   docker compose up -d --build
+#
+# compose 会从项目根目录 .env 读取 ${VAR} 替换（文件不存在时变量为空）。
+
+services:
+  chatbot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        HF_ENDPOINT: ${HF_ENDPOINT:-}
+        HF_TOKEN: ${HF_TOKEN:-}
+    image: onlinechatbot:latest
+    ports:
+      - "${PORT:-8000}:8000"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8000
+      EMBEDDING_CACHE_DIR: /app/models
+      UPLOADS_DIR: /data/uploads
+      CHROMA_DIR: /data/chroma_db
+      SETTINGS_FILE: /data/settings.json
+      HYBRID_SEARCH_ENABLED: "true"
+      RERANK_ENABLED: "true"
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-local}
+      RERANK_PROVIDER: ${RERANK_PROVIDER:-local}
+      LLM_PROVIDER: ${LLM_PROVIDER:-openai}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      LLM_MODEL: ${LLM_MODEL:-qwen-plus}
+      LOCAL_LLM_BASE_URL: ${LOCAL_LLM_BASE_URL:-http://host.docker.internal:11434/v1}
+      LOCAL_LLM_MODEL: ${LOCAL_LLM_MODEL:-qwen2.5:7b}
+      APP_API_TOKEN: ${APP_API_TOKEN:-}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8000,http://127.0.0.1:8000}
+    volumes:
+      - chatbot-uploads:/data/uploads
+      - chatbot-chroma:/data/chroma_db
+      - chatbot-settings:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+
+volumes:
+  chatbot-uploads:
+  chatbot-chroma:
+  chatbot-settings:

@@ -1,0 +1,43 @@
+# [RAGAS] 评测依赖（可选，按需安装）
+#
+# 本文件整个是为 RAGAS 评测引入的，不装也不影响服务运行与现有测试。
+#
+# 单独成文件而不是并入 requirements-dev.txt，是因为体积差了两个数量级：
+# ragas 会强制拉入 langchain / langchain-community / langchain_openai /
+# datasets(pyarrow) / instructor / scikit-network 等一大批包，
+# 而本项目主线是不依赖 LangChain 的自建栈，测试套件也是纯离线跑的。
+# 把它们塞进 dev 依赖会让每次 CI 都背上这份重量，而评测是低频的人工动作。
+#
+# 安装:
+#     pip install -r requirements-eval.txt
+# 运行:
+#     python scripts/ragas_eval.py --questions eval/questions.hss.jsonl --corpus eval/corpus
+#
+# 未装时 scripts/ragas_eval.py 的 --dump-only 仍可用（只导出样本、不算指标）。
+
+-r requirements.txt
+
+# 钉死小版本：ragas 0.4 与 0.3 的 API 不兼容（evaluate() 已废弃、指标迁到
+# ragas.metrics.collections、ground_truths 改名 reference），
+# 放宽版本范围会让评测脚本在升级后静默失效。
+ragas==0.4.3
+
+# 绕开 ragas 0.4.3 的一个上游缺陷，不能删。
+# ragas/llms/base.py 顶层写了
+#     from langchain_community.chat_models.vertexai import ChatVertexAI
+# 而该模块在 langchain-community 0.4 中已被移除。ragas 自己对
+# langchain-community 没有声明上界，pip 会装上 0.4.x，于是 `import ragas`
+# 直接抛 ModuleNotFoundError —— 装完就用不了，且报错信息完全指不到真正的原因。
+# 实测 0.3.31 与本项目其余依赖（含 langchain-core 1.6.x）可共存，pip check 通过。
+langchain-community<0.4
+
+# 语料准备：scripts/pdf_to_markdown.py 把 PDF 手册转成可入库的 Markdown。
+# 真实评测语料通常是 PDF，而本项目只吃 Markdown，这一步绕不开。
+# 纯 Python 实现，无系统级依赖。
+pypdf>=6.0
+
+# 可选：只有 --judge-provider cursor 需要它（用 Cursor agent 当第二个评委做交叉验证）。
+# 默认注释掉是因为 wheel 有 45MB，而主评委走 OpenAI 兼容端点，用不到它。
+# 需要时手动安装，脚本在缺失时会给出明确提示而不是 ImportError：
+#     pip install cursor-sdk
+# cursor-sdk

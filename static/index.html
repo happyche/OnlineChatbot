@@ -9,6 +9,7 @@
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.1/marked.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.9/purify.min.js"></script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 :root{
@@ -180,6 +181,32 @@ html,body{height:100%;font-family:'Inter',system-ui,-apple-system,sans-serif;bac
 }
 .form-group input:focus{border-color:var(--primary)}
 .form-group .hint{font-size:11px;color:var(--text-light);margin-top:4px}
+.section-title{
+  font-size:12px;font-weight:700;color:var(--primary);text-transform:uppercase;
+  letter-spacing:.5px;margin:4px 0 12px;padding-bottom:6px;border-bottom:1px solid var(--border);
+}
+.section-title:not(:first-child){margin-top:8px}
+.btn-secondary{
+  padding:8px 14px;font-size:13px;font-weight:600;cursor:pointer;
+  color:var(--primary);background:var(--primary-light);
+  border:1px solid var(--primary);border-radius:8px;
+}
+.btn-secondary:hover{background:var(--primary);color:#fff}
+.btn-secondary:disabled{opacity:.6;cursor:not-allowed}
+.active-info{
+  font-size:11px;line-height:1.7;color:var(--text-light);
+  background:var(--bg);border-radius:8px;padding:10px 12px;margin-top:4px;
+  white-space:pre-wrap;word-break:break-all;
+}
+[data-llm-group],[data-emb-group],[data-hybrid-group],[data-rerank-group],[data-pool-group]{display:none}
+[data-llm-group].show,[data-emb-group].show,[data-hybrid-group].show,
+[data-rerank-group].show,[data-pool-group].show{display:block}
+.checkbox-row{display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:600}
+.checkbox-row input{width:auto;margin:0}
+.form-group code{
+  background:var(--bg);padding:1px 4px;border-radius:4px;
+  font-size:11px;font-family:ui-monospace,Consolas,monospace;
+}
 .modal-foot{padding:16px 24px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:10px}
 .btn-save{
   padding:10px 24px;border:none;border-radius:8px;background:var(--primary);
@@ -278,25 +305,90 @@ html,body{height:100%;font-family:'Inter',system-ui,-apple-system,sans-serif;bac
       <button class="modal-close" id="closeSettings">&times;</button>
     </div>
     <div class="modal-body">
+      <div class="section-title">对话模型</div>
       <div class="form-group">
-        <label>API Key</label>
-        <input type="password" id="cfgApiKey" placeholder="sk-your-api-key">
-        <div class="hint" id="cfgApiKeyHint"></div>
+        <label>模型来源</label>
+        <select id="cfgLlmProvider">
+          <option value="openai">云端 API（需要 API Key，按量计费）</option>
+          <option value="local">自建服务（Ollama / vLLM / LM Studio / llama.cpp）</option>
+        </select>
       </div>
+
+      <div data-llm-group="openai">
+        <div class="form-group">
+          <label>API Key</label>
+          <input type="password" id="cfgApiKey" placeholder="sk-your-api-key">
+          <div class="hint" id="cfgApiKeyHint"></div>
+        </div>
+        <div class="form-group">
+          <label>API Base URL</label>
+          <input type="text" id="cfgBaseUrl" placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1">
+        </div>
+        <div class="form-group">
+          <label>模型名称</label>
+          <input type="text" id="cfgModel" placeholder="qwen-plus">
+          <div class="hint">例如 qwen-plus、qwen-max、gpt-4o</div>
+        </div>
+      </div>
+
+      <div data-llm-group="local">
+        <div class="form-group">
+          <label>服务地址</label>
+          <input type="text" id="cfgLocalBaseUrl" placeholder="http://192.168.1.10:11434/v1">
+          <div class="hint">须为 OpenAI 兼容地址，通常以 /v1 结尾。默认端口 Ollama 11434 ｜ vLLM 8000 ｜ LM Studio 1234 ｜ llama.cpp 8080</div>
+        </div>
+        <div class="form-group">
+          <label>模型名称</label>
+          <input type="text" id="cfgLocalModel" placeholder="qwen2.5:7b">
+          <div class="hint">可用下方按钮从服务器拉取实际可用的模型列表</div>
+        </div>
+        <div class="form-group">
+          <label>访问令牌（可选）</label>
+          <input type="password" id="cfgLocalApiKey" placeholder="多数自建服务无需填写">
+          <div class="hint" id="cfgLocalApiKeyHint">Ollama 会忽略此项；vLLM 若启用了 --api-key 则需填写</div>
+        </div>
+      </div>
+
       <div class="form-group">
-        <label>API Base URL</label>
-        <input type="text" id="cfgBaseUrl" placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1">
-        <div class="hint">支持任何 OpenAI 兼容的 API 地址（DashScope、OpenAI、本地 Ollama 等）</div>
+        <button class="btn-secondary" id="testLlmBtn">测试连接并列出模型</button>
+        <div class="hint" id="llmTestResult"></div>
       </div>
+
+      <div class="section-title">嵌入模型</div>
       <div class="form-group">
-        <label>LLM 模型名称</label>
-        <input type="text" id="cfgModel" placeholder="qwen-plus">
-        <div class="hint">例如: qwen-plus, qwen-turbo, qwen-max, gpt-4o</div>
+        <label>模型来源</label>
+        <select id="cfgEmbProvider">
+          <option value="local">本地推理（离线、免费、文本不出本机）</option>
+          <option value="openai">远程接口</option>
+        </select>
+        <div class="hint">切换来源会重建向量库，需要重新索引已上传的文档</div>
       </div>
-      <div class="form-group">
-        <label>Embedding 模型名称</label>
-        <input type="text" id="cfgEmbModel" placeholder="text-embedding-v3">
+
+      <div data-emb-group="local">
+        <div class="form-group">
+          <label>本地嵌入模型</label>
+          <input type="text" id="cfgLocalEmbModel" placeholder="BAAI/bge-small-zh-v1.5">
+          <div class="hint">中文知识库务必使用支持中文的模型</div>
+        </div>
       </div>
+
+      <div data-emb-group="openai">
+        <div class="form-group">
+          <label>远程嵌入模型</label>
+          <input type="text" id="cfgEmbModel" placeholder="text-embedding-v3">
+        </div>
+        <div class="form-group">
+          <label>嵌入接口地址（可选）</label>
+          <input type="text" id="cfgEmbBaseUrl" placeholder="留空则复用对话端点">
+        </div>
+        <div class="form-group">
+          <label>嵌入接口 Key（可选）</label>
+          <input type="password" id="cfgEmbApiKey" placeholder="留空则复用对话端点的 Key">
+          <div class="hint" id="cfgEmbApiKeyHint"></div>
+        </div>
+      </div>
+
+      <div class="section-title">检索与生成</div>
       <div class="form-group">
         <label>Temperature</label>
         <input type="number" id="cfgTemp" min="0" max="2" step="0.1" value="0.7">
@@ -306,6 +398,63 @@ html,body{height:100%;font-family:'Inter',system-ui,-apple-system,sans-serif;bac
         <input type="number" id="cfgTopK" min="1" max="20" value="5">
         <div class="hint">每次检索返回的最相关文档片段数量</div>
       </div>
+      <div class="form-group">
+        <label>相似度下限</label>
+        <input type="number" id="cfgMinSim" min="0" max="1" step="0.05" value="0.2">
+        <div class="hint">低于该值的片段被丢弃。只作用于向量这一路，BM25 命中的片段不受影响</div>
+      </div>
+
+      <div class="section-title">检索增强（可独立开闭以做对比）</div>
+      <div class="form-group">
+        <label class="checkbox-row">
+          <input type="checkbox" id="cfgHybrid">
+          <span>混合检索（BM25 + 向量，RRF 融合）</span>
+        </label>
+        <div class="hint">向量检索靠语义，对 <code>kubectl exec</code>、错误码这类精确串很弱，BM25 正好互补</div>
+      </div>
+      <div data-hybrid-group>
+        <div class="form-group">
+          <label>BM25 分词器</label>
+          <select id="cfgBm25Tokenizer">
+            <option value="jieba">jieba（词粒度）</option>
+            <option value="bigram">bigram（字符二元组，不依赖词典）</option>
+          </select>
+          <div class="hint">术语和新词多的语料可以对比两者再定</div>
+        </div>
+        <div class="form-group">
+          <label>RRF 平滑常数 k</label>
+          <input type="number" id="cfgRrfK" min="1" max="1000" value="60">
+          <div class="hint">越大则头部名次的优势越小，60 为原论文取值</div>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="checkbox-row">
+          <input type="checkbox" id="cfgRerank">
+          <span>交叉编码器重排</span>
+        </label>
+        <div class="hint">对候选做精排，精度更高但耗时明显增加；首次启用需下载约 1GB 权重</div>
+      </div>
+      <div data-rerank-group>
+        <div class="form-group">
+          <label>重排模型</label>
+          <input type="text" id="cfgRerankModel" placeholder="BAAI/bge-reranker-base">
+          <div class="hint">中文请用 bge-reranker-base 或 jina-reranker-v2-base-multilingual</div>
+        </div>
+        <div class="form-group">
+          <label>重排分数下限（可选）</label>
+          <input type="text" id="cfgMinRerank" placeholder="留空表示不过滤">
+          <div class="hint">交叉编码器输出未归一化，不同模型取值范围差异很大，需实测后再定</div>
+        </div>
+      </div>
+
+      <div class="form-group" data-pool-group>
+        <label>候选池大小</label>
+        <input type="number" id="cfgPool" min="1" max="200" value="20">
+        <div class="hint">开启融合或重排时每路先取这么多候选，再截到 Top K。太小会让重排无从改进排序</div>
+      </div>
+
+      <div class="active-info" id="activeInfo"></div>
     </div>
     <div class="modal-foot">
       <button class="btn-save" id="saveSettings">保存配置</button>
@@ -332,6 +481,13 @@ marked.setOptions({
   },
   breaks: true,
 });
+
+/* 助手回复来自 LLM，而 LLM 的输入包含用户上传的文档内容。
+   恶意文档可以诱导模型输出 HTML/脚本，直接 innerHTML 就是一条
+   「间接 prompt 注入 → XSS」的利用链。渲染前统一过一遍 DOMPurify。 */
+function renderMarkdown(text) {
+  return DOMPurify.sanitize(marked.parse(text), { USE_PROFILES: { html: true } });
+}
 
 /* ============================================================
    State
@@ -397,7 +553,7 @@ function addFiles(fileList) {
 
 function renderPending() {
   pendingDiv.innerHTML = pendingFiles.map((f, i) =>
-    `<div class="pending-file"><span>📄 ${f.name}</span><span class="remove" data-i="${i}">&times;</span></div>`
+    `<div class="pending-file"><span>📄 ${escapeHtml(f.name)}</span><span class="remove" data-i="${i}">&times;</span></div>`
   ).join('');
   pendingDiv.querySelectorAll('.remove').forEach(el =>
     el.addEventListener('click', () => { pendingFiles.splice(+el.dataset.i, 1); renderPending(); })
@@ -451,10 +607,10 @@ async function loadDocuments() {
     docList.innerHTML = data.documents.map(d =>
       `<div class="doc-item">
         <div class="doc-meta">
-          <span class="doc-name" title="${d.filename}">📄 ${d.filename}</span>
+          <span class="doc-name" title="${escapeHtml(d.filename)}">📄 ${escapeHtml(d.filename)}</span>
           <span class="doc-chunks">${d.chunks} 个片段</span>
         </div>
-        <button class="doc-del" data-name="${d.filename}" title="删除">&times;</button>
+        <button class="doc-del" data-name="${escapeHtml(d.filename)}" title="删除">&times;</button>
       </div>`
     ).join('');
     docList.querySelectorAll('.doc-del').forEach(el =>
@@ -465,7 +621,10 @@ async function loadDocuments() {
         loadDocuments();
       })
     );
-  } catch { /* silent */ }
+  } catch (e) {
+    docList.innerHTML = '<div class="doc-empty">文档列表加载失败</div>';
+    toast('加载文档列表失败: ' + e.message, 'error');
+  }
 }
 loadDocuments();
 
@@ -484,14 +643,18 @@ function addMessage(role, content) {
 
   const bubble = div.querySelector('.msg-bubble');
   if (content) {
-    bubble.innerHTML = role === 'user' ? escapeHtml(content) : marked.parse(content);
+    bubble.innerHTML = role === 'user' ? escapeHtml(content) : renderMarkdown(content);
   }
   messagesDiv.scrollTop = messagesDiv.scrollHeight;
   return bubble;
 }
 
+/* 引号也必须转义：文件名会被插进 title="..." / data-name="..." 这类属性，
+   只转义尖括号无法阻止属性值提前闭合。 */
 function escapeHtml(s) {
-  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  return String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
 function showTyping(bubble) {
@@ -540,14 +703,14 @@ async function sendMessage() {
           if (obj.content) full += obj.content;
         } catch {}
       }
-      bubble.innerHTML = marked.parse(full);
+      bubble.innerHTML = renderMarkdown(full);
       messagesDiv.scrollTop = messagesDiv.scrollHeight;
     }
   } catch (e) {
     full = `连接错误: ${e.message}`;
   }
 
-  bubble.innerHTML = marked.parse(full || '（无响应）');
+  bubble.innerHTML = renderMarkdown(full || '（无响应）');
   bubble.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el));
   messagesDiv.scrollTop = messagesDiv.scrollHeight;
 
@@ -576,47 +739,218 @@ settingsBtn.addEventListener('click', () => { loadSettings(); settingsModal.clas
 closeSettings.addEventListener('click', () => settingsModal.classList.remove('open'));
 settingsModal.addEventListener('click', e => { if (e.target === settingsModal) settingsModal.classList.remove('open'); });
 
+/* 只显示与当前所选来源相关的字段，避免云端和自建两套配置同时摊开造成混淆 */
+function syncProviderGroups() {
+  const llm = $('#cfgLlmProvider').value;
+  document.querySelectorAll('[data-llm-group]').forEach(el =>
+    el.classList.toggle('show', el.dataset.llmGroup === llm)
+  );
+  const emb = $('#cfgEmbProvider').value;
+  document.querySelectorAll('[data-emb-group]').forEach(el =>
+    el.classList.toggle('show', el.dataset.embGroup === emb)
+  );
+
+  const hybrid = $('#cfgHybrid').checked;
+  const rerank = $('#cfgRerank').checked;
+  document.querySelectorAll('[data-hybrid-group]').forEach(el => el.classList.toggle('show', hybrid));
+  document.querySelectorAll('[data-rerank-group]').forEach(el => el.classList.toggle('show', rerank));
+  /* 候选池只在开了融合或重排时才起作用，否则展示它只会让人误解 */
+  document.querySelectorAll('[data-pool-group]').forEach(el =>
+    el.classList.toggle('show', hybrid || rerank)
+  );
+}
+['#cfgLlmProvider', '#cfgEmbProvider', '#cfgHybrid', '#cfgRerank'].forEach(sel =>
+  $(sel).addEventListener('change', syncProviderGroups)
+);
+
+function renderActiveInfo(active) {
+  if (!active) { $('#activeInfo').textContent = ''; return; }
+  const lines = [];
+  if (active.llm_error) {
+    lines.push(`对话模型不可用：${active.llm_error}`);
+  } else {
+    lines.push(`生效的对话端点：${active.llm_provider} ｜ ${active.llm_model}`);
+    lines.push(`  ${active.llm_base_url}`);
+  }
+  lines.push(`生效的嵌入模型：${active.embedding_signature}`);
+  lines.push(
+    `检索增强：混合检索 ${active.hybrid_search_enabled ? `开启（${active.bm25_tokenizer}）` : '关闭'}` +
+    ` ｜ 重排 ${active.rerank_enabled ? `开启（${active.reranker}）` : '关闭'}`
+  );
+  $('#activeInfo').textContent = lines.join('\n');
+}
+
 async function loadSettings() {
   try {
     const res = await fetch('/api/settings');
     const s = await res.json();
+
+    $('#cfgLlmProvider').value = s.llm_provider || 'openai';
+    /* Key 一律不回填（后端也不会返回明文），只显示脱敏串 */
     $('#cfgApiKey').value = '';
     $('#cfgApiKeyHint').textContent = s.llm_api_key_display ? `当前: ${s.llm_api_key_display}` : '未设置';
     $('#cfgBaseUrl').value = s.llm_base_url || '';
     $('#cfgModel').value = s.llm_model || '';
+
+    $('#cfgLocalBaseUrl').value = s.local_llm_base_url || '';
+    $('#cfgLocalModel').value = s.local_llm_model || '';
+    $('#cfgLocalApiKey').value = '';
+    $('#cfgLocalApiKeyHint').textContent = s.local_llm_api_key_display
+      ? `当前: ${s.local_llm_api_key_display}`
+      : 'Ollama 会忽略此项；vLLM 若启用了 --api-key 则需填写';
+
+    $('#cfgEmbProvider').value = s.embedding_provider || 'local';
+    $('#cfgLocalEmbModel').value = s.local_embedding_model || '';
     $('#cfgEmbModel').value = s.embedding_model || '';
+    $('#cfgEmbBaseUrl').value = s.embedding_base_url || '';
+    $('#cfgEmbApiKey').value = '';
+    $('#cfgEmbApiKeyHint').textContent = s.embedding_api_key_display
+      ? `当前: ${s.embedding_api_key_display}`
+      : '留空则复用对话端点的 Key';
+
     $('#cfgTemp').value = s.temperature ?? 0.7;
     $('#cfgTopK').value = s.top_k ?? 5;
-  } catch { /* silent */ }
+    $('#cfgMinSim').value = s.min_similarity ?? 0.2;
+
+    $('#cfgHybrid').checked = !!s.hybrid_search_enabled;
+    $('#cfgBm25Tokenizer').value = s.bm25_tokenizer || 'jieba';
+    $('#cfgRrfK').value = s.rrf_k ?? 60;
+    $('#cfgRerank').checked = !!s.rerank_enabled;
+    $('#cfgRerankModel').value = s.rerank_model || '';
+    $('#cfgMinRerank').value = s.min_rerank_score || '';
+    $('#cfgPool').value = s.candidate_pool_size ?? 20;
+
+    syncProviderGroups();
+    renderActiveInfo(s.active);
+    $('#llmTestResult').textContent = '';
+  } catch (e) {
+    toast('读取配置失败: ' + e.message, 'error');
+  }
 }
+
+/* 自建服务最常见的问题是地址或模型名写错，这里一次性暴露两者 */
+$('#testLlmBtn').addEventListener('click', async () => {
+  const btn = $('#testLlmBtn');
+  const out = $('#llmTestResult');
+  btn.disabled = true;
+  out.textContent = '正在连接…';
+  try {
+    const res = await fetch('/api/models');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `服务器错误 (${res.status})`);
+    const models = data.models || [];
+    out.textContent = models.length
+      ? `连接成功，可用模型 ${models.length} 个：${models.join('、')}`
+      : '连接成功，但端点未返回任何模型';
+  } catch (e) {
+    out.textContent = `连接失败：${e.message}`;
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 saveSettingsBtn.addEventListener('click', async () => {
   const body = {};
+  body.llm_provider = $('#cfgLlmProvider').value;
+  body.embedding_provider = $('#cfgEmbProvider').value;
+
+  /* Key 类字段只在用户填了新值时提交，否则会把已保存的 Key 清空 */
   const apiKey = $('#cfgApiKey').value.trim();
   if (apiKey) body.llm_api_key = apiKey;
+  const localApiKey = $('#cfgLocalApiKey').value.trim();
+  if (localApiKey) body.local_llm_api_key = localApiKey;
+  const embApiKey = $('#cfgEmbApiKey').value.trim();
+  if (embApiKey) body.embedding_api_key = embApiKey;
+
   const baseUrl = $('#cfgBaseUrl').value.trim();
   if (baseUrl) body.llm_base_url = baseUrl;
   const model = $('#cfgModel').value.trim();
   if (model) body.llm_model = model;
+  const localBaseUrl = $('#cfgLocalBaseUrl').value.trim();
+  if (localBaseUrl) body.local_llm_base_url = localBaseUrl;
+  const localModel = $('#cfgLocalModel').value.trim();
+  if (localModel) body.local_llm_model = localModel;
+
+  const localEmbModel = $('#cfgLocalEmbModel').value.trim();
+  if (localEmbModel) body.local_embedding_model = localEmbModel;
   const embModel = $('#cfgEmbModel').value.trim();
   if (embModel) body.embedding_model = embModel;
+  /* 这一项允许清空（留空表示复用对话端点），因此无条件提交 */
+  body.embedding_base_url = $('#cfgEmbBaseUrl').value.trim();
+
   const temp = parseFloat($('#cfgTemp').value);
   if (!isNaN(temp)) body.temperature = temp;
   const topK = parseInt($('#cfgTopK').value);
   if (!isNaN(topK)) body.top_k = topK;
+  const minSim = parseFloat($('#cfgMinSim').value);
+  if (!isNaN(minSim)) body.min_similarity = minSim;
+
+  /* 开关必须无条件提交，否则关闭动作传不到后端 */
+  body.hybrid_search_enabled = $('#cfgHybrid').checked;
+  body.rerank_enabled = $('#cfgRerank').checked;
+  body.bm25_tokenizer = $('#cfgBm25Tokenizer').value;
+  /* 允许清空表示不过滤，因此同样无条件提交 */
+  body.min_rerank_score = $('#cfgMinRerank').value.trim();
+  const rrfK = parseInt($('#cfgRrfK').value);
+  if (!isNaN(rrfK)) body.rrf_k = rrfK;
+  const rerankModel = $('#cfgRerankModel').value.trim();
+  if (rerankModel) body.rerank_model = rerankModel;
+  const pool = parseInt($('#cfgPool').value);
+  if (!isNaN(pool)) body.candidate_pool_size = pool;
 
   try {
-    await fetch('/api/settings', {
+    const res = await fetch('/api/settings', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(body),
     });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || `服务器错误 (${res.status})`);
+
     toast('配置已保存', 'success');
-    settingsModal.classList.remove('open');
+    renderActiveInfo(data.active);
+
+    /* 对话端点配置不全时设置仍会落盘，但必须立刻让用户看到，
+       否则要等到提问失败才发现。此时保持弹窗打开便于就地修正。 */
+    if (data.llm_error) {
+      toast('对话模型不可用: ' + data.llm_error, 'error');
+    } else {
+      settingsModal.classList.remove('open');
+    }
+
+    /* 换了嵌入模型后旧向量与新查询向量不在同一空间，向量库已被重建，
+       必须重新索引，否则知识库看起来是空的。 */
+    if (data.collection_reset) {
+      if (confirm('嵌入模型已变更，向量库需要重建。是否现在重新索引所有文档？')) {
+        await reindexAll();
+      } else {
+        toast('知识库当前为空，请稍后手动重新索引', 'error');
+      }
+    }
+    loadDocuments();
   } catch (e) {
     toast('保存失败: ' + e.message, 'error');
   }
 });
+
+async function reindexAll() {
+  uploadOverlay.classList.add('active');
+  uploadStatus.textContent = '正在用新配置重建向量索引…';
+  try {
+    const res = await fetch('/api/reindex', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `服务器错误 (${res.status})`);
+    const ok = data.results.filter(r => r.status === 'success').length;
+    const failed = data.results.filter(r => r.error);
+    failed.forEach(r => toast(`${r.filename}: ${r.error}`, 'error'));
+    toast(`已重新索引 ${ok} 个文档`, 'success');
+    loadDocuments();
+  } catch (e) {
+    toast('重建索引失败: ' + e.message, 'error');
+  } finally {
+    uploadOverlay.classList.remove('active');
+  }
+}
 </script>
 </body>
 </html>

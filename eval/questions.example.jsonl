@@ -1,0 +1,10 @@
+# 公开示例问题集，对应 eval/corpus.example/运维手册.md
+# 字段说明见 scripts/validate_questions.py 与 DESIGN.md §8
+{"question": "这个项目要求 Python 什么版本？", "ground_truth": "要求 Python 3.10 或以上，推荐 3.11。", "expected_keywords": ["Python 3.10", "3.11"], "expected_sources": ["运维手册.md"], "type": "single-hop"}
+{"question": "API Key 应该配置在哪里？", "ground_truth": "在项目根目录创建 .env 文件，填入 LLM_API_KEY，且不要提交到代码仓库。", "expected_keywords": ["LLM_API_KEY", ".env"], "expected_sources": ["运维手册.md"], "type": "exact-match"}
+{"question": "TOP_K 默认是多少，调大有什么影响？", "ground_truth": "TOP_K 默认值为 5，调大会引入更多上下文，但也会增加 token 消耗和噪声。", "expected_keywords": ["TOP_K", "5"], "expected_sources": ["运维手册.md"], "type": "single-hop"}
+{"question": "服务无法启动时日志里先看什么字段？", "ground_truth": "查看启动日志中的 engine_error 字段；常见原因是 API Key 未配置，接口会返回 503。", "expected_keywords": ["engine_error", "503"], "expected_sources": ["运维手册.md"], "type": "single-hop"}
+{"question": "检索结果为空怎么排查？", "ground_truth": "确认知识库已有文档、嵌入模型未被中途更换、MIN_SIMILARITY 没有设置过高。", "expected_keywords": ["MIN_SIMILARITY"], "expected_sources": ["运维手册.md"], "type": "multi-hop"}
+{"question": "中文知识库误用英文嵌入模型会怎样？", "ground_truth": "检索结果会接近随机，应调用检索接口查看召回片段和相似度分值来确认。", "expected_keywords": ["英文的嵌入模型"], "expected_sources": ["运维手册.md"], "type": "paraphrase"}
+{"question": "REQUEST_TIMEOUT 默认多少秒？", "ground_truth": "默认 60 秒；若经常超时应先排查网络链路而不是盲目调大。", "expected_keywords": ["REQUEST_TIMEOUT", "60"], "expected_sources": ["运维手册.md"], "type": "exact-match"}
+{"question": "CHUNK_SIZE 默认多大，技术文档建议怎么调？", "ground_truth": "默认 500 字符；命令块和表格较多时建议增大到 800，避免命令被切断。", "expected_keywords": ["CHUNK_SIZE", "500", "800"], "expected_sources": ["运维手册.md"], "type": "single-hop"}

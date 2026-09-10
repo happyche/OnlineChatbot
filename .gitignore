@@ -1,0 +1,50 @@
+# ---- 本地设计笔记 / 内部变更记录（不上传公开仓库）----
+DESIGN.md
+DOCKER_DEPLOY_CHANGELOG.md
+
+# ---- 打包产物 ----
+*.tar
+onlinechatbot.tar
+
+# ---- 密钥与本地配置（切勿提交）----
+.env
+.env.*
+!.env.example
+# settings.json 保存 UI 修改后的配置，其中含 API Key 明文
+settings.json
+
+# ---- 运行时数据 ----
+chroma_db/
+uploads/
+*.log
+# Hugging Face / fastembed 下载中断留下的分片
+*.incomplete
+
+# ---- 评测：本地专用数据与运行产物 ----
+# 内部/受限语料（如 Nokia HSS 手册转换稿）
+eval/corpus/
+# 与内部语料绑定的问题集；公开仓库用 questions.example.jsonl
+eval/questions.hss.jsonl
+# 跑出来的结果，可重复生成
+eval/sweep_*.jsonl
+eval/ragas_*.jsonl
+eval/ragas_*report.md
+eval/samples*.jsonl
+eval/scored_*.jsonl
+eval/*_results.jsonl
+eval/sweep_results.jsonl
+
+# ---- Python ----
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ---- 编辑器 / 系统 ----
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

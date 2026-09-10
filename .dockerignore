@@ -1,0 +1,48 @@
+# 虚拟环境与缓存
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+*.incomplete
+
+# 密钥与本地运行时数据（不打进镜像；compose volume 挂载）
+.env
+.env.*
+settings.json
+chroma_db/
+uploads/
+*.log
+
+# 测试（运行时不需要）
+tests/
+pytest.ini
+requirements-dev.txt
+
+# 评测：问题集、语料、脚本产物（运行时不需要）
+eval/
+
+# 评测与开发脚本（构建期仅需 download_model.py，见下方例外）
+scripts/*
+!scripts/download_model.py
+requirements-eval.txt
+
+# 文档与配置模板（运行时不需要）
+DESIGN.md
+README.md
+DOCKER_DEPLOY_CHANGELOG.md
+env.example
+env.docker.example
+
+# 编辑器 / 版本库
+.idea/
+.vscode/
+.git/
+.gitignore
+
+# Docker 编排文件（打进镜像无意义）
+Dockerfile
+docker-compose.yml
+.dockerignore

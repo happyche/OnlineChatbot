@@ -1,8 +1,18 @@
 # Python 3.10+ required
-# RAG Chatbot: FastAPI + ChromaDB + Qwen (DashScope OpenAI-compatible)
+# RAG Chatbot: FastAPI + ChromaDB + 本地/远程嵌入 + Qwen（OpenAI 兼容接口）
 fastapi>=0.110.0
 uvicorn[standard]>=0.29.0
 python-multipart>=0.0.9
 python-dotenv>=1.0.0
 openai>=1.0.0
 chromadb>=0.5.0
+
+# 本地嵌入与重排模型（ONNX 推理）。
+# 选 fastembed 而非 sentence-transformers：后者依赖 PyTorch（Windows 上数百 MB 起），
+# fastembed 只需 onnxruntime，而 chromadb 已将其作为依赖装好。
+fastembed>=0.8.0
+
+# 混合检索：BM25 稀疏检索 + 中文分词。
+# 中文没有词间空格，BM25 必须先分词，否则整句会变成一个 token。
+rank_bm25>=0.2.2
+jieba>=0.42.1

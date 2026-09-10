@@ -1,0 +1,7 @@
+# 多轮追问示例问题集，对应 eval/corpus.example/运维手册.md
+# 每行除常规字段外增加 history：模拟前端 chatHistory 传入的后端上下文。
+# 评测时用 question + history 调 retrieve_with_diagnostics，对比 rewrite 开/关的 Hit@K / MRR。
+{"question": "它的默认值呢？", "history": [{"role": "user", "content": "REQUEST_TIMEOUT 默认多少秒？"}, {"role": "assistant", "content": "默认 60 秒；若经常超时应先排查网络链路。"}], "ground_truth": "REQUEST_TIMEOUT 默认 60 秒。", "expected_keywords": ["REQUEST_TIMEOUT", "60"], "expected_sources": ["运维手册.md"], "type": "multiturn-followup"}
+{"question": "调大有什么影响？", "history": [{"role": "user", "content": "TOP_K 默认是多少？"}, {"role": "assistant", "content": "TOP_K 默认值为 5。"}], "ground_truth": "调大会引入更多上下文，但也会增加 token 消耗和噪声。", "expected_keywords": ["TOP_K", "5"], "expected_sources": ["运维手册.md"], "type": "multiturn-followup"}
+{"question": "那 CHUNK_SIZE 呢？", "history": [{"role": "user", "content": "技术文档里命令块较多时 CHUNK_SIZE 建议怎么调？"}, {"role": "assistant", "content": "建议适当增大到 800，避免命令被切断。"}], "ground_truth": "CHUNK_SIZE 默认 500 字符；命令块和表格较多时建议增大到 800。", "expected_keywords": ["CHUNK_SIZE", "500", "800"], "expected_sources": ["运维手册.md"], "type": "multiturn-followup"}
+{"question": "还有别的排查项吗？", "history": [{"role": "user", "content": "检索结果为空怎么排查？"}, {"role": "assistant", "content": "确认知识库已有文档、嵌入模型未被更换、MIN_SIMILARITY 没有过高。"}], "ground_truth": "确认知识库中已有文档；确认嵌入模型未被中途更换；确认 MIN_SIMILARITY 没有设置得过高。", "expected_keywords": ["MIN_SIMILARITY"], "expected_sources": ["运维手册.md"], "type": "multiturn-followup"}
