@@ -91,7 +91,7 @@ DEFAULTS = {
     "embedding_api_key": os.getenv("EMBEDDING_API_KEY", ""),
     # 远程嵌入接口对单次请求的文本条数有上限，分批发送
     "embedding_batch_size": int(os.getenv("EMBEDDING_BATCH_SIZE", "10")),
-    "temperature": float(os.getenv("TEMPERATURE", "0.7")),
+    "temperature": float(os.getenv("TEMPERATURE", "0.2")),
     "chunk_size": int(os.getenv("CHUNK_SIZE", "500")),
     "chunk_overlap": int(os.getenv("CHUNK_OVERLAP", "50")),
     "top_k": int(os.getenv("TOP_K", "5")),
