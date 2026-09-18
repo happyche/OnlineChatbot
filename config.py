@@ -139,7 +139,43 @@ DEFAULTS = {
     "rewrite_model": os.getenv("REWRITE_MODEL", ""),
     "rewrite_temperature": float(os.getenv("REWRITE_TEMPERATURE", "0")),
 
+    # === Agent 层（可选，需 pip install -r requirements-agent.txt）===
+    # 默认关闭：agentic 取材每问多 1-3 次 LLM 调用，代价明确，
+    # 该不该开应由评测数据决定，而不是默认就背上（与两个检索增强开关同理）。
+    "agent_enabled": _flag("AGENT_ENABLED", False),
+    # 终止条件之一：模型调用次数上限。达到后带着现有材料直接作答，不报错。
+    # 一次取材 = 一次模型调用（决定调工具）+ 一次（读结果），所以 6 约等于两轮取材。
+    "agent_max_model_calls": int(os.getenv("AGENT_MAX_MODEL_CALLS", "6")),
+    # 终止条件之二：图层面的兜底。与调用次数上限管的不是同一类失效，
+    # 所以不能用其中一个推算出另一个。
+    "agent_recursion_limit": int(os.getenv("AGENT_RECURSION_LIMIT", "25")),
+    # 单次工具返回的上限。search_docs 老实返回 20 个候选的全文会直接撑爆窗口。
+    # 注意这和上下文压缩是两回事：摘要中间件折叠的是历史消息，管不到单条返回的大小。
+    "agent_tool_payload_tokens": int(os.getenv("AGENT_TOOL_PAYLOAD_TOKENS", "1200")),
+    # expand_section 的独立预算。完整章节比检索片段长得多，
+    # 用同一个上限会把「完整步骤」截成半截，等于没完成这个工具存在的目的
+    "agent_expand_payload_tokens": int(os.getenv("AGENT_EXPAND_PAYLOAD_TOKENS", "2400")),
+    # 上下文压缩（SummarizationMiddleware）：消息数超过 trigger 就把早期消息
+    # 折叠成摘要，保留最近 keep 条原文。keep 太小会让指代消解失准。
+    "agent_summary_trigger": int(os.getenv("AGENT_SUMMARY_TRIGGER", "20")),
+    "agent_summary_keep": int(os.getenv("AGENT_SUMMARY_KEEP", "8")),
+    # 服务端会话：打开后 /api/chat 带上 session_id 即按该 id 持久化对话（内存，
+    # 重启即清空），刷新页面不丢上下文。关闭时沿用原有行为：history 由前端维护。
+    # 注意 session_id 是 bearer 凭据而非身份认证，拿到 id 的人就是会话的主人；
+    # 公网暴露时务必同时配置 APP_API_TOKEN。
+    "agent_session_enabled": _flag("AGENT_SESSION_ENABLED", False),
+
     "request_timeout": float(os.getenv("REQUEST_TIMEOUT", "60")),
+
+    # 向端点索取 token 用量（OpenAI 的 stream_options.include_usage）。
+    # 流式响应默认不返回 usage，不显式索要就只能靠估算，而估算值不能用来对账。
+    #
+    # 放在 DEFAULTS 而不是模块级，是因为它是**端点的能力**而不是部署决策：
+    # 对话端点可以在运行时从云端热切到自建服务，两者的支持情况并不相同。
+    # DashScope 与较新的 Ollama 都支持；个别 vLLM / llama.cpp 版本会对这个
+    # 参数返回 400，此时置为 false 即可（固定管道会自动探测并回退，
+    # agent 路径受 langchain 封装所限只能靠这个开关）。
+    "llm_stream_usage": _flag("LLM_STREAM_USAGE", True),
 
     # 访问本机/内网地址时绕过 HTTP_PROXY。企业环境几乎都配了代理，
     # 而客户端默认读取该环境变量，导致内网自建服务的请求被发去代理并失败。
@@ -160,6 +196,88 @@ CORS_ORIGINS = [
 # 可选的访问令牌：设置后所有 /api/* 请求必须带 X-API-Token 请求头。
 # 留空表示不鉴权（仅适合本机开发）。
 APP_API_TOKEN = os.getenv("APP_API_TOKEN", "").strip()
+
+# 管理面：文档上传/删除、模型配置、检索调试、反馈统计。
+#
+# 默认关闭，给使用者的部署就是一个纯对话界面。关闭时管理端点**不注册**
+# 而不是返回 403——后者等于告诉探测者「这里有个接口，只是你没权限」。
+# 页面上的管理区块也会在服务端被剔除，不依赖前端隐藏（见 main.index）。
+#
+# 管理操作的做法是：在自己机器上用 ADMIN_ENABLED=true 起一份，配好文档与模型，
+# 配置与向量库都落盘在同一份数据目录里，对外那一份读到的就是配好的结果。
+ADMIN_ENABLED = _flag("ADMIN_ENABLED", False)
+
+# === 日志与排障 ===
+# 这三项刻意不进 DEFAULTS：DEFAULTS 里的配置可以从界面热改，
+# 而日志要在第一行代码跑起来之前就定下来，改它必须重启才有意义。
+#
+# LOG_LEVEL 设成 DEBUG 会把 httpx 每次请求、chromadb 的内部动作也一起打出来，
+# 量很大；排查具体问题时更常用的是保持 INFO、单独打开 AGENT_TRACE。
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+# 日志文件路径。留空只输出到控制台——控制台一关就什么都没有了，
+# 而 agent 的问题往往是「昨天那一问走错了工具」这种事后才发现的类型。
+LOG_FILE = os.getenv("LOG_FILE", "").strip()
+# 单个日志文件的大小上限（MB）与保留份数。日志只增不减就是一条磁盘泄漏。
+LOG_MAX_MB = int(os.getenv("LOG_MAX_MB", "20"))
+LOG_BACKUPS = int(os.getenv("LOG_BACKUPS", "3"))
+# Agent 全链路 trace：每次模型调用的完整 prompt、每个工具的入参与返回。
+# 走标准 logging 输出，因此 LOG_FILE 设了就会一起落盘。
+#
+# **默认关闭，因为它会把提问与文档原文完整写进日志。** 这和「文档默认不出本机」
+# 是同一类决定：留痕本身就是一种暴露面，该不该留必须是显式选择。
+AGENT_TRACE = _flag("AGENT_TRACE", False)
+
+# === 可观测性 ===
+# 结构化请求日志（一行一个 JSON）的落盘路径。留空则混进 LOG_FILE。
+#
+# 强烈建议单独给一个文件：这份数据的消费方式是 `jq`、pandas 和时序库，
+# 而人读日志带缩进、带多行栈回溯，混在一起会让两者都变难用。
+REQUEST_LOG_FILE = os.getenv("REQUEST_LOG_FILE", "").strip()
+
+# Prometheus 指标导出。关掉之后 /metrics 返回 404，
+# 请求记录与结构化日志不受影响——可观测性不是一个全有全无的开关。
+METRICS_ENABLED = _flag("METRICS_ENABLED", True)
+
+# 模型单价表，JSON：{"模型名": {"prompt": 每千token价, "completion": ...}}。
+# "default" 作为兜底。留空表示全部按 0 计——自建服务确实不按 token 计费，
+# 此时报 0 比报一个瞎猜的数字诚实。
+#
+# 按模型名而不是一个全局单价：llm_model 可以热改，而云端模型与内网自建
+# 模型的成本差着好几个数量级。例：
+#   LLM_PRICING={"qwen-plus":{"prompt":0.0008,"completion":0.002}}
+COST_CURRENCY = os.getenv("COST_CURRENCY", "CNY").strip() or "CNY"
+
+
+def _load_pricing() -> dict:
+    """解析 LLM_PRICING。格式错误时退回空表并告警，不能让它挡住服务启动。"""
+    raw = os.getenv("LLM_PRICING", "").strip()
+    if not raw:
+        return {}
+    try:
+        table = json.loads(raw)
+        if not isinstance(table, dict):
+            raise ValueError("顶层必须是对象")
+        return table
+    except (json.JSONDecodeError, ValueError) as exc:
+        import warnings
+
+        warnings.warn(f"LLM_PRICING 解析失败，成本一律按 0 计: {exc}")
+        return {}
+
+
+LLM_PRICING = _load_pricing()
+
+# === 在线反馈 ===
+# 落盘每一次问答的现场 + 用户的 👍/👎，用来把「线上答错了」变成回归用例。
+#
+# ⚠️ 它会把提问、答案与文档原文写进磁盘，和 AGENT_TRACE 是同一类暴露面。
+# 默认开启是因为没有反馈就没有迭代闭环；不需要时置 false 即可完全关掉。
+FEEDBACK_ENABLED = _flag("FEEDBACK_ENABLED", True)
+FEEDBACK_DB = _path_from_env("FEEDBACK_DB", "data/feedback.db")
+# 交互记录条数上限，超出则淘汰最老的、且没有人评价过的记录。
+# 「只增不减」是一条磁盘泄漏，和日志要滚动、会话要 TTL 同理；
+# 而被点过评价的记录正是这张表存在的理由，不参与淘汰。
+FEEDBACK_MAX_ROWS = int(os.getenv("FEEDBACK_MAX_ROWS", "20000"))
 
 #: 不允许通过 /api/settings 写入 settings.json 的字段（避免前端误改路径类配置）
 _MUTABLE_KEYS = set(DEFAULTS.keys())

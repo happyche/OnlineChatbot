@@ -1,0 +1,50 @@
+# 路由专用示例题集 —— 对应 eval/corpus.example/运维手册.md
+#
+# 与 questions.example.jsonl 的区别：那一份评「答得对不对」，这一份评
+# 「**取材方式选得对不对**」，也就是 agent 相对固定管道新增的那个失败维度。
+#
+# 字段：
+#   question           必填
+#   expected_tool      期望用到的工具。写 null 表示**不该取材**（闲聊、元问题）；
+#                      整个字段省略 = 这道题不参与工具选择正确率的统计
+#   type               题型，用于分组统计。均值会把类别之间的差距藏起来
+#   ground_truth       参考答案，供 RAGAS 的 context_recall / 两个 reference 指标用
+#   expected_keywords  答案里应当出现的关键词，用于不调 LLM 的粗筛
+#   expected_sources   应当被取回的文档名，用于「来源命中率」
+#
+# 判定口径：expected_tool 看「有没有用到」，不看「是不是第一个用的」。
+# expand_section 按设计必须跟在一次 search_docs 之后，按首工具判它永远是 0。
+#
+# ⚠️ 这份示例语料只有一篇约 3.5KB 的文档，切出来十来个块。这对
+#   expand_section 和 find_literal 是不够的：前者需要「一节跨多块且 top_k
+#   召不齐」，后者需要「同一个串散落在多处」。小语料下默认 top_k=5 就能召回
+#   相当大比例的全库，于是这两个工具结构性地很难被逼出来——量到的低分是
+#   语料的缺陷，不是 agent 的行为。
+#   真要下结论，请把 --questions 指向你自己语料上的题集。
+
+{"question": "这个项目要求 Python 什么版本？", "expected_tool": "search_docs", "type": "single-hop", "ground_truth": "要求 Python 3.10 或以上，推荐 3.11。", "expected_keywords": ["3.10"], "expected_sources": ["运维手册.md"]}
+{"question": "API Key 应该配置在哪里？", "expected_tool": "search_docs", "type": "single-hop", "ground_truth": "在项目根目录创建 .env 文件，填入 LLM_API_KEY，且不要提交到代码仓库。", "expected_keywords": ["LLM_API_KEY", ".env"], "expected_sources": ["运维手册.md"]}
+{"question": "REQUEST_TIMEOUT 默认多少秒？", "expected_tool": "search_docs", "type": "single-hop", "ground_truth": "默认 60 秒；经常超时应先排查网络链路而不是盲目调大。", "expected_keywords": ["60"], "expected_sources": ["运维手册.md"]}
+{"question": "TOP_K 默认是多少，调大有什么影响？", "expected_tool": "search_docs", "type": "single-hop", "ground_truth": "TOP_K 默认值为 5，调大会引入更多上下文但也会增加 token 消耗和噪声。", "expected_keywords": ["5"], "expected_sources": ["运维手册.md"]}
+{"question": "CHUNK_SIZE 默认多大，技术文档里建议调成多少？", "expected_tool": "search_docs", "type": "single-hop", "ground_truth": "默认 500 字符；命令块和表格较多时建议增大到 800，避免命令被切断。", "expected_keywords": ["500", "800"], "expected_sources": ["运维手册.md"]}
+{"question": "服务无法启动时日志里先看什么字段？", "expected_tool": "search_docs", "type": "single-hop", "ground_truth": "查看启动日志中的 engine_error 字段；最常见原因是 API Key 未配置，业务接口会返回 503。", "expected_keywords": ["engine_error", "503"], "expected_sources": ["运维手册.md"]}
+{"question": "公司内网装不了依赖怎么办？", "expected_tool": "search_docs", "type": "paraphrase", "ground_truth": "配置镜像源，例如 pip config set global.index-url 指向阿里云镜像。", "expected_keywords": ["镜像"], "expected_sources": ["运维手册.md"]}
+{"question": "中文知识库用英文嵌入模型会怎样？", "expected_tool": "search_docs", "type": "paraphrase", "ground_truth": "检索结果会接近随机，这是最容易被忽略的一类配置错误，可用检索接口查看召回片段和相似度确认。", "expected_keywords": ["随机"], "expected_sources": ["运维手册.md"]}
+
+{"question": "把「检索结果为空」这一节的完整排查步骤原原本本给我，一步都不要漏", "expected_tool": "expand_section", "type": "full-section", "ground_truth": "依次确认：知识库中已有文档；嵌入模型未被中途更换（更换会导致向量库重建并清空）；相似度阈值 MIN_SIMILARITY 没有设置得过高。", "expected_keywords": ["MIN_SIMILARITY"], "expected_sources": ["运维手册.md"]}
+{"question": "「配置说明」这一章完整讲了哪些内容？请给出该章节的全部正文", "expected_tool": "expand_section", "type": "full-section", "ground_truth": "包含 API Key 配置、检索参数调优（TOP_K、CHUNK_SIZE）与超时设置（REQUEST_TIMEOUT）三部分。", "expected_keywords": ["TOP_K", "REQUEST_TIMEOUT"], "expected_sources": ["运维手册.md"]}
+{"question": "「长段落测试专区」那一节的完整内容是什么？", "expected_tool": "expand_section", "type": "full-section", "ground_truth": "该节是一段刻意写成的超长中文段落，用于验证切分逻辑对无空格中文的处理，确认切分器在标点处断开、每块不超上限且相邻块保留重叠。", "expected_keywords": ["切分"], "expected_sources": ["运维手册.md"]}
+{"question": "「故障处理」这一章的完整内容给我看一下", "expected_tool": "expand_section", "type": "full-section", "ground_truth": "包含服务无法启动、检索结果为空、回答内容与文档无关三个小节。", "expected_keywords": ["engine_error"], "expected_sources": ["运维手册.md"]}
+
+{"question": "文档里所有出现 MIN_SIMILARITY 的地方都在哪里？一处都不要漏", "expected_tool": "find_literal", "type": "enumerate", "ground_truth": "出现在「故障处理 › 检索结果为空」一节，作为相似度阈值排查项。", "expected_keywords": ["MIN_SIMILARITY"], "expected_sources": ["运维手册.md"]}
+{"question": "列出文档中全部提到 .env 的位置", "expected_tool": "find_literal", "type": "enumerate", "ground_truth": "出现在「配置说明 › API Key 配置」一节，分别说明创建 .env 填入密钥、以及 .env 绝对不能提交到代码仓库。", "expected_keywords": [".env"], "expected_sources": ["运维手册.md"]}
+{"question": "CHUNK_SIZE 这个词在文档里一共出现在哪几处？", "expected_tool": "find_literal", "type": "enumerate", "ground_truth": "出现在「配置说明 › 检索参数调优」一节，说明默认 500 字符、技术文档建议增大到 800。", "expected_keywords": ["CHUNK_SIZE"], "expected_sources": ["运维手册.md"]}
+{"question": "把所有包含 engine_error 的段落都找出来", "expected_tool": "find_literal", "type": "enumerate", "ground_truth": "出现在「故障处理 › 服务无法启动」一节，作为排查的第一个字段。", "expected_keywords": ["engine_error"], "expected_sources": ["运维手册.md"]}
+
+{"question": "你好，你能做什么？", "expected_tool": null, "type": "chitchat", "ground_truth": "说明自己是基于知识库的文档助手，可以回答知识库内文档相关的问题。"}
+{"question": "谢谢，帮了大忙", "expected_tool": null, "type": "chitchat", "ground_truth": "礼貌回应即可，不需要检索知识库。"}
+{"question": "你有哪几个工具可以用？", "expected_tool": null, "type": "chitchat", "ground_truth": "说明自己可以做语义检索、按章节取全文、以及全库字面串查找。"}
+
+{"question": "这个系统的 Kubernetes 部署 YAML 怎么写？", "expected_tool": "search_docs", "type": "unanswerable", "ground_truth": "知识库中没有 Kubernetes 部署相关内容，应当明确说明查不到而不是推测。", "expected_keywords": ["没有"], "expected_sources": ["运维手册.md"]}
+{"question": "运维值班的具体排班表在哪里能看到？", "expected_tool": "search_docs", "type": "unanswerable", "ground_truth": "文档只说明值班电话由值班表统一发布，没有给出排班表的具体位置。", "expected_keywords": ["值班表"], "expected_sources": ["运维手册.md"]}
+{"question": "系统支持的最大并发连接数是多少？", "expected_tool": "search_docs", "type": "unanswerable", "ground_truth": "知识库中没有关于最大并发连接数的说明，应当明确说明查不到。", "expected_keywords": ["没有"], "expected_sources": ["运维手册.md"]}

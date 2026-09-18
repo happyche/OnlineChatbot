@@ -65,8 +65,6 @@ def main() -> int:
     resp = client.get("/api/health")
     body = resp.json()
     check("健康检查可用", resp.status_code == 200, f"status={body.get('status')}")
-    if body.get("engine_error"):
-        notes.append(f"引擎降级: {body['engine_error']}")
 
     # ---- 首页 ----
     resp = client.get("/")
@@ -74,8 +72,20 @@ def main() -> int:
     check("前端已引入 DOMPurify", "purify.min.js" in resp.text)
 
     # ---- API Key 不泄漏 ----
+    # 这一节起全都要管理面（读配置、列模型、上传文档）。关着的话每条都会以
+    # 404 失败，而那个报错指不到真正的原因，所以先明确判一次。
     resp = client.get("/api/settings")
+    if resp.status_code == 404:
+        print(
+            "\n管理面未启用（ADMIN_ENABLED=false），冒烟要用的配置与上传接口不存在。\n"
+            "请用 ADMIN_ENABLED=true 重启服务后再跑。"
+        )
+        return 1
     settings = resp.json()
+    # 引擎降级的原因属管理面信息，从 detail 取
+    detail = client.get("/api/health/detail")
+    if detail.status_code == 200 and detail.json().get("engine_error"):
+        notes.append(f"引擎降级: {detail.json()['engine_error']}")
     check("配置接口不返回 llm_api_key 字段", "llm_api_key" not in settings)
     check(
         "配置接口返回脱敏展示串",

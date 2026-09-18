@@ -29,6 +29,7 @@ import asyncio
 import hashlib
 import logging
 import re
+import time
 from dataclasses import dataclass
 from typing import AsyncIterator, Optional
 
@@ -37,10 +38,19 @@ from openai import AsyncOpenAI
 
 import config
 from embeddings import Embedder, build_embedder
+from observability import estimate_tokens
 from query_rewrite import resolve_search_query
 from retrieval import BM25Index, Reranker, build_reranker, reciprocal_rank_fusion
 
 logger = logging.getLogger(__name__)
+
+#: 已知不支持 stream_options 的端点（base_url）。
+#:
+#: 流式响应默认不返回 token 用量，必须显式索要；但个别 OpenAI 兼容实现
+#: （某些 vLLM / llama.cpp 版本）会对这个参数直接返回 400。探测一次、记住结论、
+#: 之后不再尝试——比让用户去读文档猜自己的端点支持什么更省事，
+#: 也比为了保守而永远不要用量更有用。
+_NO_STREAM_USAGE: set[str] = set()
 
 COLLECTION_NAME = "documents"
 
@@ -314,6 +324,17 @@ class RAGEngine:
         return self._state.collection_reset
 
     @property
+    def chunk_overlap(self) -> int:
+        """
+        [AGENT] 当前生效的切分重叠字符数。
+
+        拼接整节正文时要按它去掉相邻片段的重复。读引擎快照而不是让调用方
+        自己去翻 settings，是为了和热重载保持一致——配置改了之后，
+        拼接用的重叠值必须和实际切分时用的是同一个。
+        """
+        return max(0, int(self._state.settings.get("chunk_overlap", 0)))
+
+    @property
     def embedder(self) -> Embedder:
         """
         [RAGAS] 当前生效的嵌入模型。
@@ -565,6 +586,112 @@ class RAGEngine:
             if source:
                 counts[source] = counts.get(source, 0) + 1
         return [{"filename": k, "chunks": v} for k, v in sorted(counts.items())]
+
+    @staticmethod
+    def _as_chunks(raw: dict) -> list[dict]:
+        """把 Chroma 的 get 结果整理成按 (source, chunk_index) 排序的块列表。"""
+        out: list[dict] = []
+        for doc_id, text, meta in zip(
+            raw.get("ids") or [],
+            raw.get("documents") or [],
+            raw.get("metadatas") or [],
+        ):
+            meta = meta or {}
+            out.append(
+                {
+                    "doc_id": doc_id,
+                    "text": text,
+                    "source": meta.get("source", "未知来源"),
+                    "heading": meta.get("heading", ""),
+                    "chunk_index": int(meta.get("chunk_index", 0)),
+                }
+            )
+        out.sort(key=lambda c: (c["source"], c["chunk_index"]))
+        return out
+
+    async def fetch_section(
+        self, source: str, heading: Optional[str] = None
+    ) -> list[dict]:
+        """
+        [AGENT] 取某一节（或整篇文档）的全部文本块，按原文顺序排列。
+
+        存在的理由是检索管道结构性做不到的一件事：**把命中片段还原成完整章节**。
+        「这一节的完整操作步骤是什么」这类问题，检索只会给回最相似的一两个 500 字
+        片段，而步骤是跨块的——调大 top_k 也解决不了，因为相邻块未必更相似。
+
+        过滤下推给向量库（metadata 精确匹配），不把语料拉进内存筛：
+        几百篇文档、几万个块时，全量加载是每次调用几十 MB 的开销。
+
+        heading 为空则取整篇文档，用于章节名匹配失败时的兜底——
+        范围限定在单篇文档内，量级可控。
+        """
+        where: dict = (
+            {"$and": [{"source": source}, {"heading": heading}]}
+            if heading
+            else {"source": source}
+        )
+        raw = await asyncio.to_thread(
+            self._state.collection.get,
+            where=where,
+            include=["documents", "metadatas"],
+        )
+        return self._as_chunks(raw)
+
+    async def document_exists(self, source: str) -> bool:
+        """
+        [AGENT] 这篇文档在库里吗。
+
+        单独给一个方法而不是让调用方去 list_documents()：后者要扫全部块的
+        metadata 才能算出文档清单，而这里只需要知道「有没有」，
+        `limit=1` 一条就够。几万个块时这是「一次全表扫描」和「一次索引命中」的差别。
+        """
+        raw = await asyncio.to_thread(
+            self._state.collection.get,
+            where={"source": source},
+            limit=1,
+            include=[],
+        )
+        return bool(raw.get("ids"))
+
+    async def find_literal(
+        self, text: str, source: Optional[str] = None, limit: int = 40
+    ) -> dict:
+        """
+        [AGENT] 字面串查找，返回全部命中的位置。
+
+        存在的理由是「所有出现 X 的地方」这类要求列全的问题：
+        检索按相似度返回 top_k，会**悄悄截断**且不会提示还有更多。
+
+        匹配下推给 Chroma 的 `where_document={"$contains": ...}`，
+        不在 Python 里做全库正则扫描。两个由此而来的性质必须说清楚：
+
+        - **大小写敏感**。对 `REQUEST_TIMEOUT`、`nokia-imshss` 这类技术标识符
+          正好是想要的行为。
+        - **只匹配正文，不匹配标题**。Chroma 里存的 document 不含标题
+          （标题只进 metadata，见 2.2）。这不是缺陷：标题本来就参与向量化，
+          按章节名查找是 `retrieve` 的职责，这里专管正文里的精确串。
+
+        先用只取 id 的查询拿到命中总数，再按 limit 取回正文——
+        这样「命中 137 处，展示前 40 处」里的 137 是真实数字，
+        而不是一个被 limit 截断后没人说得清的数。
+        """
+        where = {"source": source} if source else None
+        matched = await asyncio.to_thread(
+            self._state.collection.get,
+            where=where,
+            where_document={"$contains": text},
+            include=[],
+        )
+        ids = list(matched.get("ids") or [])
+        if not ids:
+            return {"total": 0, "chunks": []}
+
+        raw = await asyncio.to_thread(
+            self._state.collection.get,
+            ids=ids[: max(1, limit)],
+            include=["documents", "metadatas"],
+        )
+        return {"total": len(ids), "chunks": self._as_chunks(raw)}
 
     async def reindex(self) -> list[dict]:
         """
@@ -882,23 +1009,79 @@ class RAGEngine:
             f"参考资料：\n{context}"
         )
 
-    async def _stream_chat(self, state: _EngineState, messages: list[dict]) -> AsyncIterator[str]:
+    @staticmethod
+    def _looks_like_unsupported_param(exc: Exception) -> bool:
         """
-        调用 LLM 流式补全，逐段产出文本。抽成独立方法便于测试替换。
+        判断异常是否为「端点不认识 stream_options」。
 
-        模型名取自解析后的端点，而不是固定读 settings["llm_model"]——
-        自建服务用的是 local_llm_model，读错字段会把云端模型名发给本地服务。
+        只认 400/422 或错误文本里点了这个参数的名字。范围收窄是必须的：
+        把认证失败、模型名写错也当成「不支持用量」去静默重试，
+        只会让真正的配置错误多绕一圈才暴露出来。
         """
-        if state.client is None or state.chat is None:
-            raise RuntimeError(f"对话模型不可用: {state.chat_error}")
+        status = getattr(exc, "status_code", None)
+        text = str(exc).lower()
+        return status in (400, 422) or "stream_options" in text
 
-        stream = await state.client.chat.completions.create(
+    async def _open_stream(
+        self, state: _EngineState, messages: list[dict], want_usage: bool
+    ):
+        """建立流式补全连接。想要用量时先试带 stream_options 的版本。"""
+        kwargs = dict(
             model=state.chat.model,
             messages=messages,
             temperature=state.settings["temperature"],
             stream=True,
         )
+        base_url = state.chat.base_url
+        if want_usage and base_url not in _NO_STREAM_USAGE:
+            try:
+                return await state.client.chat.completions.create(
+                    **kwargs, stream_options={"include_usage": True}
+                )
+            except Exception as exc:
+                if not self._looks_like_unsupported_param(exc):
+                    raise
+                _NO_STREAM_USAGE.add(base_url)
+                logger.warning(
+                    "端点 %s 不接受 stream_options，token 用量将改用估算值: %s",
+                    base_url,
+                    exc,
+                )
+        return await state.client.chat.completions.create(**kwargs)
+
+    async def _stream_chat(
+        self,
+        state: _EngineState,
+        messages: list[dict],
+        *,
+        usage: Optional[dict] = None,
+    ) -> AsyncIterator[str]:
+        """
+        调用 LLM 流式补全，逐段产出文本。抽成独立方法便于测试替换。
+
+        模型名取自解析后的端点，而不是固定读 settings["llm_model"]——
+        自建服务用的是 local_llm_model，读错字段会把云端模型名发给本地服务。
+
+        usage 非空时，端点如实返回的 token 用量会被写进这个字典。做成显式的
+        出参而不是改返回类型，理由和 AgentRunner.astream 的 collect 一样：
+        它只有计费和指标需要，主路径不该为此背上一个二元组。
+
+        ⚠️ 用量在**流的最后一个分片**里，而那个分片的 choices 是空的。
+        所以判断条件必须是 `if chunk.choices`，不能写成先取 choices[0]
+        再判断内容——后者会在最后一个分片上抛 IndexError，表现成一次
+        「答案已经流完了但请求最后失败」的诡异故障。
+        """
+        if state.client is None or state.chat is None:
+            raise RuntimeError(f"对话模型不可用: {state.chat_error}")
+
+        stream = await self._open_stream(state, messages, usage is not None)
         async for chunk in stream:
+            reported = getattr(chunk, "usage", None)
+            if usage is not None and reported is not None:
+                usage["prompt_tokens"] = getattr(reported, "prompt_tokens", 0) or 0
+                usage["completion_tokens"] = (
+                    getattr(reported, "completion_tokens", 0) or 0
+                )
             if chunk.choices and chunk.choices[0].delta.content:
                 yield chunk.choices[0].delta.content
 
@@ -962,21 +1145,61 @@ class RAGEngine:
         }
 
     async def query(
-        self, question: str, history: Optional[list[dict]] = None
+        self,
+        question: str,
+        history: Optional[list[dict]] = None,
+        *,
+        collect: Optional[dict] = None,
     ) -> AsyncIterator[str]:
         """
         RAG 问答主入口（异步生成器）。
 
         流程：检索 → 组装 system prompt → 拼接历史 → 流式生成 → 附加参考来源。
+
+        collect 非空时，本次的观测数据会被写进这个字典：
+
+            retrieve_seconds / generate_seconds   分阶段耗时
+            usage                                 端点返回的 token 用量（可能为空）
+            prompt_estimate                       送入模型的 prompt 的估算 token 数
+            contexts                              本次实际依据的资料
+
+        为什么要 prompt_estimate：端点不返回 usage 时它是唯一的退路，而这里是
+        **唯一**能算准它的地方——messages 组装完就出了函数作用域，接入层
+        再想估算只能拿问题正文去猜，把上千 token 的资料整段漏掉。
+
+        contexts 也一并导出，理由见 feedback.py：一条 badcase 缺了「当时取回了
+        什么资料」就无法区分这是检索问题还是生成问题，而两者的修法完全不同。
+
+        做成可选出参而不是改返回类型：这条是线上主路径，
+        不该为了观测把签名从「产出文本」变成「产出二元组」。
         """
         # 取一次快照，避免中途热重载导致前后使用不一致的配置
         state = self._state
 
+        started = time.perf_counter()
         hits = await self.retrieve(question, history=history)
         messages = self._build_messages(state, question, hits, history)
 
-        async for piece in self._stream_chat(state, messages):
+        usage: dict = {}
+        if collect is not None:
+            collect["retrieve_seconds"] = time.perf_counter() - started
+            collect["usage"] = usage
+            collect["prompt_estimate"] = sum(
+                estimate_tokens(str(m.get("content", ""))) for m in messages
+            )
+            collect["contexts"] = [
+                {"text": hit.text, "source": hit.source, "heading": hit.heading}
+                for hit in hits
+            ]
+
+        generate_started = time.perf_counter()
+        async for piece in self._stream_chat(
+            state, messages, usage=usage if collect is not None else None
+        ):
             yield piece
+
+        if collect is not None:
+            collect["generate_seconds"] = time.perf_counter() - generate_started
 
         if hits:
             citations = []

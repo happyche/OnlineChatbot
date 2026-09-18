@@ -16,3 +16,8 @@ fastembed>=0.8.0
 # 中文没有词间空格，BM25 必须先分词，否则整句会变成一个 token。
 rank_bm25>=0.2.2
 jieba>=0.42.1
+
+# 指标导出（/metrics）。纯 Python、无二级依赖。
+# 代码里做了缺失保护：没装它时 /metrics 返回 501，而 trace_id、成本核算、
+# 结构化请求日志与在线反馈照常工作——可观测性不该是全有全无的开关。
+prometheus-client>=0.20.0

@@ -1,0 +1,22 @@
+# Agent 层依赖（可选）
+# ===================
+# 只有把 agent_enabled 打开时才需要安装。
+#
+# 为什么独立成文件，理由与 requirements-eval.txt 相同：
+# 主线 requirements.txt 只有 8 个包，是「自建栈、部署轻」这条设计约束的一部分。
+# agentic 检索有明确的延迟与调用量代价（每问多 1-3 次 LLM 调用），
+# 应当由数据决定是否开启，不该让所有部署都背上这份依赖。
+#
+#     pip install -r requirements-agent.txt
+#
+# agent/runner.py 对这几个包的 import 做了惰性保护，未安装时给出可照做的提示；
+# agent/tools.py 只依赖 langchain-core，因此工具层的单元测试在未装时仍然可跑。
+
+# create_agent（模型 ⇄ 工具循环）、SummarizationMiddleware（上下文压缩）、
+# ModelCallLimitMiddleware（终止条件）。langgraph 是它的传递依赖，
+# 提供 InMemorySaver 与 recursion_limit，这里不直接使用它的图 API。
+langchain>=1.0,<2.0
+
+# 把项目现有的 OpenAI 兼容端点接成 LangChain chat model。
+# 端点寻址仍然走 config.resolve_llm，这里只负责协议适配。
+langchain-openai>=1.0,<2.0

@@ -161,7 +161,7 @@ async def test_query_uses_rewritten_text_for_retrieval(make_engine, manual_text,
 
     captured: list[list[dict]] = []
 
-    async def fake_stream(self, state, messages):
+    async def fake_stream(self, state, messages, **kwargs):
         captured.append(messages)
         yield "ok"
 

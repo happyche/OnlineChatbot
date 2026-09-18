@@ -138,6 +138,25 @@ html,body{height:100%;font-family:'Inter',system-ui,-apple-system,sans-serif;bac
 .typing-dot:nth-child(3){animation-delay:.4s;margin-right:0}
 @keyframes blink{0%,80%,100%{opacity:.3}40%{opacity:1}}
 
+/* Agent 取材进度轨迹：答案出现前的中间态，正文出现后即被替换 */
+.agent-trace{color:var(--text-light);font-size:12px;line-height:1.8;margin-bottom:8px;
+  padding-left:8px;border-left:2px solid var(--border)}
+
+/* 反馈条：贴在答案气泡下面，平时很淡，鼠标移到整条消息上才显出来。
+   它不能抢注意力——但也不能藏到用户找不着，所以是「淡」而不是「隐藏」。 */
+.feedback{display:flex;align-items:center;gap:6px;margin-top:8px;font-size:12px;
+  opacity:.45;transition:opacity .15s}
+.msg:hover .feedback,.feedback.is-open,.feedback.is-done{opacity:1}
+.feedback button{
+  border:1px solid var(--border);background:var(--card);border-radius:7px;
+  padding:3px 8px;cursor:pointer;font-size:12px;line-height:1.4;color:var(--text-light);
+}
+.feedback button:hover{border-color:var(--primary);color:var(--primary)}
+.feedback button.active{border-color:var(--primary);background:#eef2ff;color:var(--primary)}
+.feedback .feedback-note{color:var(--text-light)}
+.feedback-reasons{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.feedback-reasons button{font-size:11px;padding:3px 8px}
+
 /* Input */
 .input-section{padding:0 24px 20px}
 .input-wrap{
@@ -255,6 +274,7 @@ html,body{height:100%;font-family:'Inter',system-ui,-apple-system,sans-serif;bac
 <body>
 
 <div id="app">
+  <!-- ADMIN-BEGIN -->
   <!-- Sidebar -->
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-header"><h2>📁 文档管理</h2></div>
@@ -275,17 +295,20 @@ html,body{height:100%;font-family:'Inter',system-ui,-apple-system,sans-serif;bac
       <div id="docList"><div class="doc-empty">暂无文档</div></div>
     </div>
   </aside>
+  <!-- ADMIN-END -->
 
   <!-- Chat -->
   <main class="chat-area">
     <header class="chat-header">
       <h1>💬 智能文档助手</h1>
-      <button class="btn-settings" id="settingsBtn">⚙️ 模型配置</button>
+      <!-- ADMIN-BEGIN --><button class="btn-settings" id="settingsBtn">⚙️ 模型配置</button><!-- ADMIN-END -->
     </header>
     <div class="messages" id="messages">
       <div class="welcome">
         <h2>👋 欢迎使用智能文档助手</h2>
-        <p>上传公司内部 Markdown 文档，系统会自动建立向量索引。<br>之后你可以随时提问，我会根据文档内容为你提供准确的回答。</p>
+        <!-- 文案对两种部署都要说得通，所以不提「上传」：给使用者的那份里
+             上传功能不存在，提它只会让人找一个不存在的按钮。 -->
+        <p>你可以直接提问，我会依据知识库中的文档内容为你提供准确的回答，<br>并在答案末尾标注参考来源。</p>
       </div>
     </div>
     <div class="input-section">
@@ -297,6 +320,7 @@ html,body{height:100%;font-family:'Inter',system-ui,-apple-system,sans-serif;bac
   </main>
 </div>
 
+<!-- ADMIN-BEGIN -->
 <!-- Settings Modal -->
 <div class="modal-overlay" id="settingsModal">
   <div class="modal">
@@ -469,6 +493,7 @@ html,body{height:100%;font-family:'Inter',system-ui,-apple-system,sans-serif;bac
     <p id="uploadStatus">正在处理文档并生成向量索引…</p>
   </div>
 </div>
+<!-- ADMIN-END -->
 
 <!-- Toast Container -->
 <div class="toast-container" id="toastContainer"></div>
@@ -492,29 +517,43 @@ function renderMarkdown(text) {
 /* ============================================================
    State
    ============================================================ */
+/* ADMIN-BEGIN */
 let pendingFiles = [];
+/* ADMIN-END */
 let chatHistory = [];
+/* 服务端会话：开启后对话由服务端按 sessionId 持久化，刷新不丢上下文；
+   关闭时 sessionId 恒为 null，仍然走 chatHistory 这条原有路径。
+   id 只存在本地、不放进 URL——拿到它就等于拿到这段对话。 */
+let sessionId = null;
+const SESSION_KEY = 'onlinechatbot.session';
 let isStreaming = false;
+/* 反馈能力由服务端报告（FEEDBACK_ENABLED）。关掉时连按钮都不渲染——
+   渲染一个点下去必然 503 的按钮比没有按钮更糟。
+   原因选项也从服务端取，避免前后端各维护一份而对不上（聚合就此失真）。 */
+let feedbackEnabled = false;
+let feedbackReasons = {};
 
 /* ============================================================
    DOM refs
    ============================================================ */
 const $=s=>document.querySelector(s);
+const messagesDiv  = $('#messages');
+const questionInput= $('#questionInput');
+const sendBtn      = $('#sendBtn');
+/* ADMIN-BEGIN */
 const dropZone     = $('#dropZone');
 const fileInput    = $('#fileInput');
 const browseLink   = $('#browseLink');
 const pendingDiv   = $('#pendingFiles');
 const uploadBtn    = $('#uploadBtn');
 const docList      = $('#docList');
-const messagesDiv  = $('#messages');
-const questionInput= $('#questionInput');
-const sendBtn      = $('#sendBtn');
 const settingsBtn  = $('#settingsBtn');
 const settingsModal= $('#settingsModal');
 const closeSettings= $('#closeSettings');
 const saveSettingsBtn=$('#saveSettings');
 const uploadOverlay= $('#uploadOverlay');
 const uploadStatus = $('#uploadStatus');
+/* ADMIN-END */
 
 /* ============================================================
    Toast
@@ -527,6 +566,7 @@ function toast(msg, type='info') {
   setTimeout(() => el.remove(), 3500);
 }
 
+/* ADMIN-BEGIN */
 /* ============================================================
    File upload handling
    ============================================================ */
@@ -627,6 +667,104 @@ async function loadDocuments() {
   }
 }
 loadDocuments();
+/* ADMIN-END */
+
+/* ============================================================
+   服务端会话（Agent 模式可选；未开启时这一整段都不生效）
+   ============================================================ */
+
+/* 只有服务端报告 session_enabled 时才启用。id 在本地生成并长期复用，
+   服务端拿它当 thread_id 存取对话——所以它是一份凭据，别泄露出去。 */
+async function initSession() {
+  let health;
+  try {
+    health = await (await fetch('/api/health')).json();
+  } catch { return; }
+
+  /* 反馈能力顺便在这里定下来：只有一次 /api/health，两件事都靠它的回报，
+     没必要为了各自的开关各发一个请求。 */
+  feedbackEnabled = !!(health.observability && health.observability.feedback_enabled);
+  if (feedbackEnabled) {
+    try {
+      feedbackReasons = (await (await fetch('/api/feedback/reasons')).json()).reasons || {};
+    } catch { feedbackReasons = {}; }
+  }
+
+  if (!health.agent || !health.agent.session_enabled) return;
+
+  sessionId = localStorage.getItem(SESSION_KEY);
+  if (!sessionId) {
+    sessionId = crypto.randomUUID();
+    localStorage.setItem(SESSION_KEY, sessionId);
+  }
+}
+initSession();
+
+/* ============================================================
+   在线反馈
+   ============================================================ */
+
+/* 在一条答案下面挂出反馈条。
+
+   traceId 为空就直接不挂：没有 trace_id 的评价无法关联到任何一次问答，
+   收上来也只是一个孤立的计数，反而会污染满意度分母。 */
+function attachFeedback(bubble, traceId) {
+  if (!feedbackEnabled || !traceId) return;
+
+  const bar = document.createElement('div');
+  bar.className = 'feedback';
+  bar.innerHTML = `
+    <button data-verdict="up" title="回答有用">👍</button>
+    <button data-verdict="down" title="回答有问题">👎</button>
+    <span class="feedback-note"></span>
+    <div class="feedback-reasons" hidden></div>`;
+  bubble.appendChild(bar);
+
+  const note = bar.querySelector('.feedback-note');
+  const reasonsBox = bar.querySelector('.feedback-reasons');
+
+  const send = async (verdict, reason) => {
+    try {
+      const res = await fetch('/api/feedback', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ trace_id: traceId, verdict, reason: reason || null }),
+      });
+      if (!res.ok) throw new Error((await res.json()).detail || res.status);
+      /* 落定之后禁掉按钮而不是整条移除：留着它才能看出「这条我评过了」，
+         也让重复点击不会攒出互相矛盾的记录（服务端按最后一次算）。 */
+      bar.classList.add('is-done');
+      note.textContent = verdict === 'up' ? '已记录，谢谢' : '已记录，会用来改进';
+      bar.querySelectorAll('button').forEach(b => { b.disabled = true; });
+      reasonsBox.hidden = true;
+    } catch (e) {
+      note.textContent = `提交失败: ${e.message}`;
+    }
+  };
+
+  bar.querySelectorAll('button[data-verdict]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const verdict = btn.dataset.verdict;
+      btn.classList.add('active');
+      if (verdict === 'up') { send('up'); return; }
+
+      /* 👎 先问原因再提交。总数没有行动含义——「38 条差评」不指向任何动作，
+         「其中 24 条是答案不全」直接指向 expand_section 的路由准确率。
+         但原因不能是必填：不想说的人应该也能表达不满。 */
+      const entries = Object.entries(feedbackReasons);
+      if (!entries.length) { send('down'); return; }
+      bar.classList.add('is-open');
+      note.textContent = '哪里有问题？';
+      reasonsBox.hidden = false;
+      reasonsBox.innerHTML = entries
+        .map(([k, label]) => `<button data-reason="${escapeHtml(k)}">${escapeHtml(label)}</button>`)
+        .join('');
+      reasonsBox.querySelectorAll('button').forEach(rb => {
+        rb.addEventListener('click', () => send('down', rb.dataset.reason));
+      });
+    });
+  });
+}
 
 /* ============================================================
    Chat
@@ -657,6 +795,18 @@ function escapeHtml(s) {
     .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
+/* 把 agent 的事件翻成一句人话。返回空串表示这个事件不值得展示。 */
+function describeAgentEvent(obj) {
+  switch (obj.type) {
+    case 'plan':
+      return `· 选用工具：${(obj.tools || []).join('、')}`;
+    case 'tool':
+      return `· ${obj.tool}：${obj.summary}`;
+    default:
+      return '';
+  }
+}
+
 function showTyping(bubble) {
   bubble.innerHTML = '<span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span>';
 }
@@ -675,12 +825,31 @@ async function sendMessage() {
   showTyping(bubble);
 
   let full = '';
+  /* 这一问的 trace_id。反馈要靠它关联，所以两个来源都收：响应头是主渠道
+     （流还没开始就能拿到），流末尾的 meta 事件是备份——反向代理和跨域漏配
+     expose_headers 都会让响应头静默变成 null。 */
+  let traceId = '';
+  /* Agent 模式下取材可能要两三轮，首字之前会有十几秒空白。
+     没有中间态的 agent 在用户看来和卡死没有区别，所以把工具事件
+     渲染成一条进度轨迹；它同时也是排查 agent 走错路时最直接的证据。 */
+  let trace = [];
+  const renderBubble = () => {
+    const head = trace.length
+      ? `<div class="agent-trace">${trace.map(escapeHtml).join('<br>')}</div>`
+      : '';
+    bubble.innerHTML = head + renderMarkdown(full);
+  };
   try {
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ question: q, history: chatHistory }),
+      body: JSON.stringify(
+        sessionId
+          ? { question: q, session_id: sessionId }   /* 历史由服务端维护 */
+          : { question: q, history: chatHistory }
+      ),
     });
+    traceId = res.headers.get('X-Trace-Id') || '';
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
@@ -700,18 +869,29 @@ async function sendMessage() {
         try {
           const obj = JSON.parse(payload);
           if (obj.error) { full += `\n\n**错误:** ${obj.error}`; break; }
+          /* reset：刚才那段文本是模型在取材前说的开场白，不是答案 */
+          if (obj.type === 'reset') { full = ''; continue; }
+          if (obj.type === 'meta') { traceId = obj.trace_id || traceId; continue; }
           if (obj.content) full += obj.content;
+          else {
+            const line = describeAgentEvent(obj);
+            if (line) trace.push(line);
+          }
         } catch {}
       }
-      bubble.innerHTML = renderMarkdown(full);
+      renderBubble();
       messagesDiv.scrollTop = messagesDiv.scrollHeight;
     }
   } catch (e) {
     full = `连接错误: ${e.message}`;
   }
 
+  trace = [];
   bubble.innerHTML = renderMarkdown(full || '（无响应）');
   bubble.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el));
+  /* 反馈条在最终渲染之后挂：上面那行 innerHTML 会把气泡内容整体重写，
+     先挂就会被冲掉——而且不会报错，只是按钮无声消失。 */
+  attachFeedback(bubble, traceId);
   messagesDiv.scrollTop = messagesDiv.scrollHeight;
 
   chatHistory.push({role: 'user', content: q});
@@ -732,6 +912,7 @@ questionInput.addEventListener('input', function() {
   this.style.height = Math.min(this.scrollHeight, 120) + 'px';
 });
 
+/* ADMIN-BEGIN */
 /* ============================================================
    Settings
    ============================================================ */
@@ -951,6 +1132,7 @@ async function reindexAll() {
     uploadOverlay.classList.remove('active');
   }
 }
+/* ADMIN-END */
 </script>
 </body>
 </html>

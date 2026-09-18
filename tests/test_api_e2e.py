@@ -42,7 +42,25 @@ class TestHealth:
         body = client.get("/api/health").json()
 
         assert body["status"] == "ok"
+
+    def test_health_hides_endpoint_details(self, client):
+        """
+        给使用者的那份 health 不能带端点地址、模型名与引擎错误原文。
+
+        模型配置正是管理面要藏起来的东西，而这个接口对每个能打开页面的人
+        都可见；engine_error 还会带出内部异常文本。
+        """
+        body = client.get("/api/health").json()
+
+        assert "active" not in body
+        assert "engine_error" not in body
+
+    def test_health_detail_reports_endpoints(self, client):
+        """搬到管理面的那份要照旧完整。"""
+        body = client.get("/api/health/detail").json()
+
         assert body["engine_error"] is None
+        assert body["active"]["llm_model"]
 
     def test_index_page_served(self, client):
         resp = client.get("/")

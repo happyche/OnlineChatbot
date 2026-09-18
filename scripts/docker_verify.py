@@ -56,7 +56,16 @@ def main() -> int:
     resp = client.get("/api/health")
     body = resp.json()
     ok("health", resp.status_code == 200)
-    ok("engine ready", body.get("status") == "ok", body.get("engine_error") or "")
+    ok("engine ready", body.get("status") == "ok")
+
+    # 下面的检查要上传文档、读配置，全属管理面。关着的话每一条都会以 404 失败，
+    # 而那个报错完全指不到「开关没开」——先把话说明白。
+    if client.get("/api/settings").status_code == 404:
+        print(
+            "\n管理面未启用（ADMIN_ENABLED=false），本脚本要用的上传与配置接口不存在。\n"
+            "请用 ADMIN_ENABLED=true 重启容器后再验证。"
+        )
+        return 1
 
     settings = client.get("/api/settings").json()
     ok("hybrid enabled", settings.get("hybrid_search_enabled") is True)

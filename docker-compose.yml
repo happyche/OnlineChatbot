@@ -22,6 +22,16 @@ services:
       UPLOADS_DIR: /data/uploads
       CHROMA_DIR: /data/chroma_db
       SETTINGS_FILE: /data/settings.json
+      # 反馈库必须落在挂载卷上，否则容器一重建，攒下来的 badcase 全没了
+      FEEDBACK_DB: /data/feedback.db
+      FEEDBACK_ENABLED: ${FEEDBACK_ENABLED:-true}
+      # 结构化请求日志同样落卷。容器的 stdout 会被日志驱动截断/轮转，
+      # 而这份数据是要用 jq 事后翻的
+      REQUEST_LOG_FILE: /data/requests.jsonl
+      METRICS_ENABLED: ${METRICS_ENABLED:-true}
+      LLM_PRICING: ${LLM_PRICING:-}
+      COST_CURRENCY: ${COST_CURRENCY:-CNY}
+      LLM_STREAM_USAGE: ${LLM_STREAM_USAGE:-true}
       HYBRID_SEARCH_ENABLED: "true"
       RERANK_ENABLED: "true"
       EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-local}

@@ -17,6 +17,11 @@ settings.json
 chroma_db/
 uploads/
 *.log
+# 反馈库：含提问、答案与文档原文，和 .env 同一类东西，绝不能进仓库
+data/
+# 日志目录整体排除：app.log 之外还有脚本的 stdout/stderr 留痕，
+# 它们同样会带上提问正文，逐个模式列举早晚会漏一个
+logs/
 # Hugging Face / fastembed 下载中断留下的分片
 *.incomplete
 
@@ -33,6 +38,11 @@ eval/samples*.jsonl
 eval/scored_*.jsonl
 eval/*_results.jsonl
 eval/sweep_results.jsonl
+# 从线上差评导出的题集：含真实提问，且是可重复生成的产物
+eval/questions.badcase.jsonl
+eval/questions.regression.jsonl
+# agent 评测的跑分结果，跟 sweep_results 同类：可重复生成，不进仓库
+eval/agent-*.json
 
 # ---- Python ----
 .venv/

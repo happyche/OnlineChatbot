@@ -278,7 +278,7 @@ class TestPromptAssembly:
 
         captured: list[list[dict]] = []
 
-        async def fake_stream(self, state, messages):
+        async def fake_stream(self, state, messages, **kwargs):
             captured.append(messages)
             yield "ok"
 

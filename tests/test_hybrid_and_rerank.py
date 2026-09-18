@@ -488,7 +488,8 @@ class TestRetrieveEndpoint:
         assert body["stages"]["corpus_size"] == 0
 
     def test_health_reports_retrieval_flags(self, client):
-        active = client.get("/api/health").json()["active"]
+        # 生效端点的回显属管理面，见 main.health 的注释
+        active = client.get("/api/health/detail").json()["active"]
 
         assert "hybrid_search_enabled" in active
         assert "rerank_enabled" in active

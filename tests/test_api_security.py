@@ -125,3 +125,100 @@ class TestCorsDefaults:
     def test_wildcard_origin_not_used(self):
         """本服务持有密钥且能删文件，不应放行任意来源。"""
         assert "*" not in config.CORS_ORIGINS
+
+
+class TestAdminSurface:
+    """
+    ADMIN_ENABLED=false 时给使用者的那份部署应当只是一个纯对话界面。
+
+    测试全程跑在 ADMIN_ENABLED=true 下（见 conftest），因为绝大多数用例
+    要覆盖管理接口。所以这里不去重载 main，而是分别验证两件事：
+    管理端点挂在 admin router 上（关闭时整个 router 不注册），
+    以及页面剔除逻辑（它在每次请求时读开关，可以直接 monkeypatch）。
+    """
+
+    #: 关闭管理面后不应该还能访问到的路径
+    ADMIN_PATHS = [
+        "/api/upload",
+        "/api/reindex",
+        "/api/documents",
+        "/api/documents/{filename}",
+        "/api/settings",
+        "/api/models",
+        "/api/retrieve",
+        "/api/agent",
+        "/api/health/detail",
+        "/api/feedback/stats",
+        "/api/feedback/badcases",
+    ]
+
+    #: 使用者必须还能用的路径
+    USER_PATHS = ["/api/chat", "/api/health", "/api/feedback", "/api/feedback/reasons"]
+
+    def _paths(self, router):
+        return {route.path for route in router.routes}
+
+    def test_admin_endpoints_are_not_on_the_user_router(self):
+        """
+        挂错 router 是这套隔离唯一的失效方式，而且是静默的——
+        写成 @api 照样能跑通所有功能测试，只是关掉开关之后它依然对外。
+        """
+        import main
+
+        user_paths = self._paths(main.api)
+        for path in self.ADMIN_PATHS:
+            assert path not in user_paths, f"{path} 仍挂在面向使用者的 router 上"
+
+    def test_admin_router_covers_every_admin_path(self):
+        import main
+
+        admin_paths = self._paths(main.admin)
+        for path in self.ADMIN_PATHS:
+            assert path in admin_paths, f"{path} 不在 admin router 上"
+
+    def test_user_endpoints_survive_without_admin_router(self):
+        """只注册 api router 时，对话、健康检查与反馈必须照常可用。"""
+        from fastapi import FastAPI
+
+        import main
+
+        app = FastAPI()
+        app.include_router(main.api)
+        paths = {route.path for route in app.routes}
+
+        for path in self.USER_PATHS:
+            assert path in paths
+        for path in self.ADMIN_PATHS:
+            assert path not in paths
+
+    def test_page_drops_admin_blocks(self, client, monkeypatch):
+        """
+        页面里不能留下管理相关的 DOM 与脚本。
+
+        断言具体的元素 id 而不只是「变短了」：区块标记写漏一个闭合标签，
+        页面照样会短一截，但漏掉的那块仍然发了出去。
+        """
+        monkeypatch.setattr(config, "ADMIN_ENABLED", False)
+
+        html = client.get("/").text
+
+        assert "ADMIN-BEGIN" not in html and "ADMIN-END" not in html
+        for marker in [
+            "dropZone",
+            "settingsModal",
+            "uploadOverlay",
+            "docList",
+            "/api/upload",
+            "/api/settings",
+            "loadDocuments",
+        ]:
+            assert marker not in html, f"页面里仍有管理面痕迹: {marker}"
+
+    def test_page_keeps_chat_when_admin_disabled(self, client, monkeypatch):
+        """剔除不能把聊天一起带走——脚本引用了被删元素就会整段报错。"""
+        monkeypatch.setattr(config, "ADMIN_ENABLED", False)
+
+        html = client.get("/").text
+
+        for marker in ["/api/chat", "sendMessage", "questionInput", "attachFeedback"]:
+            assert marker in html

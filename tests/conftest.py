@@ -30,13 +30,28 @@ os.environ["LLM_API_KEY"] = "test-key-not-a-real-credential"
 # 固定对话提供方作为基线：否则开发者 .env 里的 LLM_PROVIDER 会渗进测试，
 # 导致「本机跑通、别人机器上失败」。需要 local 的用例自行 override。
 os.environ["LLM_PROVIDER"] = "openai"
+# 同理固定 agent 开关：开着的话 /api/chat 会走 agent 路径去调真实端点，
+# 表现成一个莫名其妙的 401。需要 agent 的用例自己注入假模型。
+os.environ["AGENT_ENABLED"] = "false"
+os.environ["AGENT_SESSION_ENABLED"] = "false"
 # 指向临时目录，避免污染开发者本地的向量库、上传文件和配置
 os.environ["SETTINGS_FILE"] = str(_TMP_ROOT / "settings.json")
 os.environ["UPLOADS_DIR"] = str(_TMP_ROOT / "uploads")
 os.environ["CHROMA_DIR"] = str(_TMP_ROOT / "chroma")
 os.environ["APP_API_TOKEN"] = ""
+# 测试要覆盖文档上传、模型配置这些管理接口，而它们默认不注册（给使用者的
+# 部署里是 404）。这个开关在 main 导入时就决定了 router 装不装，
+# 所以必须在这里设、不能用 monkeypatch——「关闭时是 404」由专门的用例
+# 另起一个 app 来验证（test_api_security.TestAdminSurface）。
+os.environ["ADMIN_ENABLED"] = "true"
 # 哈希嵌入的相似度分布与真实模型不同，默认不过滤；阈值行为由专门的用例覆盖
 os.environ["MIN_SIMILARITY"] = "0.0"
+# 反馈库指向临时目录；每个用例还会再拿一份独立的（见 isolated_feedback_db）
+os.environ["FEEDBACK_DB"] = str(_TMP_ROOT / "feedback.db")
+# 结构化请求日志不落盘：测试里它只会在临时目录外留一堆 jsonl
+os.environ["REQUEST_LOG_FILE"] = ""
+# 假的流式实现不返回 usage，索要 stream_options 只会让替身多背一个参数
+os.environ["LLM_STREAM_USAGE"] = "false"
 
 import pytest  # noqa: E402  必须在设置环境变量之后导入
 
@@ -87,6 +102,23 @@ def isolated_settings_file(tmp_path, monkeypatch):
     写入的配置会泄漏到后续用例，形成隐蔽的测试顺序依赖。
     """
     monkeypatch.setattr(config, "SETTINGS_FILE", tmp_path / "settings.json")
+
+
+@pytest.fixture(autouse=True)
+def isolated_feedback_db(tmp_path, monkeypatch):
+    """
+    每个用例使用独立的反馈库。
+
+    存储是进程级单例（和 checkpointer 同理），不重置的话第一个用例建的连接会
+    一直指向它自己的临时目录，后面所有用例的断言都在读别人的数据——
+    而这种串扰只会表现成「单跑通过、全跑失败」。
+    """
+    import feedback
+
+    monkeypatch.setattr(config, "FEEDBACK_DB", tmp_path / "feedback.db")
+    feedback.reset_store()
+    yield
+    feedback.reset_store()
 
 
 @pytest.fixture
@@ -168,7 +200,7 @@ def client(tmp_path, monkeypatch):
 
     captured: list[list[dict]] = []
 
-    async def fake_stream(self, state, messages):
+    async def fake_stream(self, state, messages, **kwargs):
         captured.append(messages)
         yield "这是"
         yield "模拟回答。"

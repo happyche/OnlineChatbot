@@ -71,7 +71,7 @@ async def test_answer_returns_response_and_contexts_together(
 ):
     """answer() 必须同时给出答案与本次依据的 contexts —— 这是接 RAGAS 的前提。"""
 
-    async def fake_stream(self, state, messages):
+    async def fake_stream(self, state, messages, **kwargs):
         yield "模拟"
         yield "回答。"
 
@@ -99,7 +99,7 @@ async def test_answer_excludes_citation_footer_that_query_appends(
     计入 faithfulness 会被当成凭空断言，把分数系统性地压低。
     """
 
-    async def fake_stream(self, state, messages):
+    async def fake_stream(self, state, messages, **kwargs):
         yield "模拟回答。"
 
     monkeypatch.setattr(RAGEngine, "_stream_chat", fake_stream)
@@ -125,7 +125,7 @@ async def test_answer_and_query_build_identical_prompts(
     """
     captured: list[list[dict]] = []
 
-    async def fake_stream(self, state, messages):
+    async def fake_stream(self, state, messages, **kwargs):
         captured.append(messages)
         yield "模拟回答。"
 
@@ -147,7 +147,7 @@ async def test_answer_honours_history_role_whitelist(make_engine, manual_text, m
     """answer() 走的是同一条组装路径，防注入的角色白名单必须同样生效。"""
     captured: list[list[dict]] = []
 
-    async def fake_stream(self, state, messages):
+    async def fake_stream(self, state, messages, **kwargs):
         captured.append(messages)
         yield "模拟回答。"
 
