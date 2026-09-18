@@ -305,7 +305,7 @@ python scripts/validate_questions.py eval/questions.regression.jsonl --corpus ev
 
 ## 评测结果
 
-在真实企业语料（196 块、49 条中文问题）上，对四种检索组合做消融（`top_k=5`，嵌入 `bge-small-zh-v1.5`）：
+在真实企业语料（196 块、100 条中文问题）上，对四种检索组合做消融（`top_k=5`，嵌入 `bge-small-zh-v1.5`）：
 
 **关键词指标（Hit@K / MRR）**
 
@@ -316,7 +316,7 @@ python scripts/validate_questions.py eval/questions.regression.jsonl --corpus ev
 | + rerank | 81.8% | 0.726 | MRR +23.6% |
 | hybrid + rerank | **86.4%** | **0.790** | **MRR +34.4%** |
 
-**RAGAS 检索质量（LLM 裁判，49 题）**
+**RAGAS 检索质量（LLM 裁判，100 题）**
 
 | 组合 | context_precision | context_recall |
 |------|-------------------|----------------|
