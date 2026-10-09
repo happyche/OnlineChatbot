@@ -20,3 +20,12 @@ langchain>=1.0,<2.0
 # 把项目现有的 OpenAI 兼容端点接成 LangChain chat model。
 # 端点寻址仍然走 config.resolve_llm，这里只负责协议适配。
 langchain-openai>=1.0,<2.0
+
+# 落盘的会话存储（AsyncSqliteSaver）。只有 AGENT_SESSION_ENABLED 打开时才用到，
+# 未安装时会话自动退回内存，行为与接入它之前一致。
+#
+# 选 SQLite 而不是 Postgres，与 feedback.py 同一个理由：它不需要额外的服务进程，
+# 库就是挂载卷上的一个文件，备份是一次文件拷贝。代价是写入串行、且只能单进程
+# 独占——要多副本共享会话就得换 langgraph-checkpoint-postgres，
+# 换法见 agent/runner.py 的 open_checkpointer（只有连接串一行不同）。
+langgraph-checkpoint-sqlite>=3.0,<4.0

@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -200,8 +201,43 @@ def require_token(x_api_token: Optional[str] = Header(default=None)):
 # 应用初始化
 # ====================================================================
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    应用生命周期：只负责会话库的开与关。
+
+    引擎刻意不在这里初始化（见 EngineHolder）：它必须容忍失败，而 lifespan 里
+    抛异常会让进程根本起不来，用户也就没有任何途径通过 UI 补上配置。
+    会话库沿用同一条准则——打不开就记下原因、退回内存存储，
+    由 /api/health/detail 回答「会话为什么没生效」，而不是让整个服务起不来。
+
+    只在开关打开时才打开库：关着的时候不该在磁盘上留下一个会话文件。
+    """
+    import agent
+
+    settings = config.load_settings()
+    if not (_sessions_enabled(settings) and agent.is_available()):
+        yield
+        return
+
+    # 用 ExitStack 而不是直接 `async with ... : yield`：后者会把应用运行期
+    # 抛出的异常一并收进 except，然后在已经 yield 过一次的生成器里再 yield
+    # 一次——ASGI 服务器只会得到一句 "generator didn't stop"。
+    # try 必须只罩住「打开」这一步。
+    async with AsyncExitStack() as stack:
+        try:
+            await stack.enter_async_context(
+                agent.open_session_store(config.AGENT_SESSION_DB)
+            )
+        except Exception as exc:
+            logger.error("会话库打开失败，会话退回内存存储（重启即清空）: %s", exc)
+            agent.set_session_store_error(str(exc))
+        yield
+
+
 app = FastAPI(
     title="RAG 智能文档助手",
+    lifespan=lifespan,
     # /docs 会把整个接口清单连同请求体结构一起摆出来。管理面关闭时
     # 它只剩对话那几个接口，但给使用者的部署本就不需要交互式文档，
     # 少一个可探测面总是好的。
@@ -313,6 +349,9 @@ class SettingsRequest(BaseModel):
     agent_recursion_limit: Optional[int] = Field(default=None, ge=4, le=100)
     agent_tool_payload_tokens: Optional[int] = Field(default=None, ge=100, le=50000)
     agent_expand_payload_tokens: Optional[int] = Field(default=None, ge=100, le=50000)
+    # 交叉编码器的原始 logit，可正可负，所以不设上下限——范围随重排模型而变，
+    # 卡一个数值区间只会在换模型后变成一个说不出理由的拒绝。
+    agent_low_confidence_score: Optional[float] = None
     agent_summary_trigger: Optional[int] = Field(default=None, ge=4, le=200)
     agent_summary_keep: Optional[int] = Field(default=None, ge=2, le=100)
     agent_session_enabled: Optional[bool] = None
@@ -447,6 +486,9 @@ async def health_detail():
             "enabled": agent_enabled,
             "available": agent_available,
             "session_enabled": _sessions_enabled(settings) and agent_available,
+            # 会话开着但库没打开时，对话仍然能用，只是重启即清空。
+            # 不报出来的话，「昨天的会话怎么没了」就完全无从查起。
+            "session_error": agent.session_store_error(),
             # 开了开关却没装依赖是最该被立刻看见的一种配置错误。
             "error": (
                 agent.MISSING_DEPS
@@ -488,7 +530,9 @@ def build_agent_runner(engine: RAGEngine, settings: dict, with_session: bool = F
     取一次配置快照、用完即弃最简单。
 
     会话存储则相反，必须是进程级单例（见 agent.runner.default_checkpointer）：
-    agent 可以重装，checkpointer 不能，否则每个请求都是一张空白的会话表。
+    agent 可以重装，checkpointer 不能——它持有一条数据库连接，
+    跟着请求重建就是每个请求开一次库、连接数随并发线性增长。
+    单例由启动期的 lifespan 注入。
     """
     import agent
 

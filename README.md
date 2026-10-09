@@ -221,15 +221,32 @@ python scripts/ragas_eval.py --questions eval/questions.hss.jsonl --dump-only
 「模型反复调工具停不下来」，达到后带着现有材料直接作答而不是报错；
 `AGENT_RECURSION_LIMIT` 是图层面的兜底。
 
+**但兜底必须比调用上限宽**，否则它先触发，用户拿到的是一句
+「Agent 达到递归上限 N 仍未结束」而不是答案，那条优雅收尾的路径等于白写。
+换算不直观：一次模型调用在图上占 5 步（两个 `before_model` 钩子 + `model` +
+一个 `after_model`，再加 `tools`），收尾还要 2 步，所以
+`AGENT_MAX_MODEL_CALLS=6` 需要 `AGENT_RECURSION_LIMIT` 至少 32。
+配小了不会出事：运行期会按 `5N+2` 抬上去并警告一次，但配置就与实际不符了。
+
 ### 服务端会话（可选）
 
 再开 `AGENT_SESSION_ENABLED=true`，前端会带上一个 `session_id`，
-对话改由服务端按它持久化（LangGraph 的 `InMemorySaver`），刷新页面不再丢上下文。
+对话改由服务端按它持久化，刷新页面不再丢上下文。
 消息数超过 `AGENT_SUMMARY_TRIGGER` 时由 `SummarizationMiddleware`
 把早期消息折叠成摘要，保留最近 `AGENT_SUMMARY_KEEP` 条原文。
 
-默认存内存，**重启即清空，不落盘**。要持久化，装
-`langgraph-checkpoint-sqlite` 并替换 checkpointer 即可，其余代码不用改。
+存储是 LangGraph 的 `AsyncSqliteSaver`，落在 `AGENT_SESSION_DB`
+（默认 `data/sessions.db`），**重启不丢**。选 SQLite 而不是 Postgres 是为了
+不给部署再添一个服务进程，代价是写入串行、库文件单进程独占：要多副本共享
+会话就得换 `langgraph-checkpoint-postgres`，改动只有 `agent/runner.py`
+里 `open_checkpointer` 的依赖与连接串两行，其余代码不受影响。
+
+连接在应用启动期打开（`main.lifespan`）。**打不开不会让服务起不来**——
+会话退回内存存储，原因报在 `/api/health/detail` 的 `agent.session_error`。
+
+> **⚠️ 这是唯一会把对话原文写进磁盘的地方。** 开关默认关闭，关着时连库文件
+> 都不会创建；打开它意味着你要能回答「存多久、谁能读、怎么删」。
+> 容器部署务必把它指向挂载卷。
 
 > **会话 id 是凭据而不是身份认证**：拿到 id 的人就是这段对话的主人。
 > 当前 id 由前端生成，服务端不做归属校验，公网暴露时务必同时配置 `APP_API_TOKEN`。

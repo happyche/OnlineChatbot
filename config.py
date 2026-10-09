@@ -144,23 +144,44 @@ DEFAULTS = {
     # 该不该开应由评测数据决定，而不是默认就背上（与两个检索增强开关同理）。
     "agent_enabled": _flag("AGENT_ENABLED", False),
     # 终止条件之一：模型调用次数上限。达到后带着现有材料直接作答，不报错。
-    # 一次取材 = 一次模型调用（决定调工具）+ 一次（读结果），所以 6 约等于两轮取材。
+    # 模型调用次数 = 取材轮数 + 1：「读上一轮结果」与「决定这一轮调什么」是
+    # 同一次调用，多出来的那次是最后生成答案的。所以 6 允许最多 5 轮取材。
     "agent_max_model_calls": int(os.getenv("AGENT_MAX_MODEL_CALLS", "6")),
     # 终止条件之二：图层面的兜底。与调用次数上限管的不是同一类失效，
-    # 所以不能用其中一个推算出另一个。
-    "agent_recursion_limit": int(os.getenv("AGENT_RECURSION_LIMIT", "25")),
+    # 所以不能用其中一个推算出另一个，但**必须比它宽**：兜底是报错中止，
+    # 先触发的话用户拿到的就是报错而不是答案。
+    #
+    # 默认 32 是配 AGENT_MAX_MODEL_CALLS=6 算出来的（一次模型调用在图上占 5 步，
+    # 收尾再加 2）。调大调用次数上限时这里要一起调大——忘了也不会出事，
+    # agent.runner 会按下限抬上去并警告一次，但配置文件就与实际不符了。
+    "agent_recursion_limit": int(os.getenv("AGENT_RECURSION_LIMIT", "32")),
     # 单次工具返回的上限。search_docs 老实返回 20 个候选的全文会直接撑爆窗口。
     # 注意这和上下文压缩是两回事：摘要中间件折叠的是历史消息，管不到单条返回的大小。
     "agent_tool_payload_tokens": int(os.getenv("AGENT_TOOL_PAYLOAD_TOKENS", "1200")),
     # expand_section 的独立预算。完整章节比检索片段长得多，
     # 用同一个上限会把「完整步骤」截成半截，等于没完成这个工具存在的目的
     "agent_expand_payload_tokens": int(os.getenv("AGENT_EXPAND_PAYLOAD_TOKENS", "2400")),
+    # search_docs 的「命中存疑」阈值，比较对象是重排最高分。
+    #
+    # 低于它只是在工具返回里附一句提示（见 agent/tools.py::_confidence_note），
+    # **不过滤任何结果**。这个区别是校准数据定的：向量检索永远返回 top_k，
+    # 知识库里没有的问题照样拿到一批「读起来像」的片段，模型分辨不出来，
+    # 于是挨个试遍所有工具直到撞上调用次数上限——几分钟才换来一句「不知道」。
+    #
+    # 为什么不做成硬过滤（min_rerank_score 至今留空也是这个原因）：
+    # 实测本地语料，阈值 1.0 能挡住全部「同领域但库里没有」的问题，
+    # 但同时会误杀库内两类文档——标题带格式噪声的、以及只有两三块的小文档。
+    # 漏答比慢几分钟严重得多，所以只提示、不删数据，让模型看着材料自己判断。
+    #
+    # 量纲是交叉编码器的原始 logit，换重排模型必须重新校准。
+    "agent_low_confidence_score": float(os.getenv("AGENT_LOW_CONFIDENCE_SCORE", "1.0")),
     # 上下文压缩（SummarizationMiddleware）：消息数超过 trigger 就把早期消息
     # 折叠成摘要，保留最近 keep 条原文。keep 太小会让指代消解失准。
     "agent_summary_trigger": int(os.getenv("AGENT_SUMMARY_TRIGGER", "20")),
     "agent_summary_keep": int(os.getenv("AGENT_SUMMARY_KEEP", "8")),
-    # 服务端会话：打开后 /api/chat 带上 session_id 即按该 id 持久化对话（内存，
-    # 重启即清空），刷新页面不丢上下文。关闭时沿用原有行为：history 由前端维护。
+    # 服务端会话：打开后 /api/chat 带上 session_id 即按该 id 持久化对话，
+    # 刷新页面甚至重启进程都不丢上下文（落盘位置见 AGENT_SESSION_DB）。
+    # 关闭时沿用原有行为：history 由前端维护，服务端不存。
     # 注意 session_id 是 bearer 凭据而非身份认证，拿到 id 的人就是会话的主人；
     # 公网暴露时务必同时配置 APP_API_TOKEN。
     "agent_session_enabled": _flag("AGENT_SESSION_ENABLED", False),
@@ -278,6 +299,17 @@ FEEDBACK_DB = _path_from_env("FEEDBACK_DB", "data/feedback.db")
 # 「只增不减」是一条磁盘泄漏，和日志要滚动、会话要 TTL 同理；
 # 而被点过评价的记录正是这张表存在的理由，不参与淘汰。
 FEEDBACK_MAX_ROWS = int(os.getenv("FEEDBACK_MAX_ROWS", "20000"))
+
+# === 服务端会话存储 ===
+# agent_session_enabled 打开时，多轮对话落在这个 SQLite 文件里。
+#
+# ⚠️ 对话内容比文档原文更敏感，而这是本项目第一次把它写进磁盘：
+# 原先的内存存储不需要回答「存多久、谁能读、怎么删」，现在需要了。
+# 开关默认关闭，关闭时这个文件根本不会被创建。
+#
+# 路径类配置，故不放进 DEFAULTS：会话库换路径等于换掉所有人的会话，
+# 不该能从 /api/settings 热改（_MUTABLE_KEYS 只收 DEFAULTS 的键）。
+AGENT_SESSION_DB = _path_from_env("AGENT_SESSION_DB", "data/sessions.db")
 
 #: 不允许通过 /api/settings 写入 settings.json 的字段（避免前端误改路径类配置）
 _MUTABLE_KEYS = set(DEFAULTS.keys())

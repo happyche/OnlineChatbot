@@ -42,7 +42,7 @@ def build_runner(
     构造 AgentRunner。惰性导入 runner.py，把「没装依赖」变成一条可读提示。
 
     model 可注入，用于离线测试。
-    with_session 为真时接上进程级 InMemorySaver，按 thread_id 持久化对话；
+    with_session 为真时接上进程级会话存储，按 thread_id 持久化对话；
     为假则每次运行都是全新状态，沿用「历史由前端维护」的原有行为。
     """
     try:
@@ -55,3 +55,41 @@ def build_runner(
         model=model,
         checkpointer=default_checkpointer() if with_session else None,
     )
+
+
+def open_session_store(path):
+    """
+    打开落盘的会话库，返回一个 async 上下文管理器。
+
+    供应用启动期使用（见 main.lifespan）：在 with 块内 build_runner(with_session=True)
+    拿到的就是这个落盘实例，块外则退回内存。放在这里而不是让接入层直接 import
+    runner，理由同 build_runner——把「没装依赖」收敛成一条可读提示。
+    """
+    try:
+        from .runner import open_checkpointer
+    except ImportError as exc:  # pragma: no cover - 取决于环境是否装了 langchain
+        raise RuntimeError(MISSING_DEPS) from exc
+    return open_checkpointer(path)
+
+
+def session_store_error() -> Optional[str]:
+    """
+    会话库为什么没打开；一切正常时为 None。
+
+    没装 langchain 时也返回 None：那种情况下 agent 整体不可用，
+    由 MISSING_DEPS 解释，不该再多报一条派生的会话错误。
+    """
+    try:
+        from .runner import session_store_error as _err
+    except ImportError:  # pragma: no cover - 取决于环境是否装了 langchain
+        return None
+    return _err()
+
+
+def set_session_store_error(reason: Optional[str]) -> None:
+    """记下会话库打开失败的原因。供接入层在启动期调用。"""
+    try:
+        from .runner import set_session_store_error as _set
+    except ImportError:  # pragma: no cover - 取决于环境是否装了 langchain
+        return
+    _set(reason)

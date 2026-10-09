@@ -24,23 +24,38 @@ Agent 装配与驱动
 
 三、**终止条件**。模型循环本身没有上限，写错 prompt 就能让它反复调工具。
    ModelCallLimitMiddleware 管调用次数，recursion_limit 管图层面的兜底，
-   两者管的不是同一类失效，不能用一个推算出另一个。
+   两者管的不是同一类失效，不能用一个推算出另一个。但**顺序是有要求的**：
+   兜底必须比调用上限宽，否则用户拿到的是一句报错而不是答案。
+   一次模型调用在图上要走好几步，这个换算见 AgentRunner.recursion_limit。
 
-会话持久化用 InMemorySaver，按 thread_id 存取。存内存意味着重启即清空——
-这既是代价也是特性：「文档默认不出本机」是本项目的第一条设计约束，
-而对话内容比文档更敏感，没有磁盘留痕就不需要回答「存多久、谁能读、怎么删」。
+会话持久化按 thread_id 存取，存储落在本机的一个 SQLite 文件里
+（AsyncSqliteSaver，位置见 config.AGENT_SESSION_DB）。选它而不是 Postgres 是
+为了不给部署再添一个服务进程，与 feedback.py 同一个权衡；代价是写入串行、
+库文件单进程独占，要多副本共享会话就得换 Postgres 版的 saver。
+
+落盘本身是一个有代价的决定：「文档默认不出本机」是本项目的第一条设计约束，
+而对话内容比文档更敏感。原先用内存存储，重启即清空，也就不必回答
+「存多久、谁能读、怎么删」——现在必须回答了。因此开关默认关闭，
+关着的时候连库文件都不会创建；打开它是一次显式的部署选择。
 """
 from __future__ import annotations
 
 import logging
 import re
 import time
-from typing import AsyncIterator, Optional
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import AsyncIterator, Optional, Union
 
 from langchain.agents import create_agent
-from langchain.agents.middleware import ModelCallLimitMiddleware, SummarizationMiddleware
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain.agents.middleware import (
+    AgentMiddleware,
+    ModelCallLimitMiddleware,
+    SummarizationMiddleware,
+)
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.errors import GraphRecursionError
 
@@ -142,27 +157,169 @@ def build_model(settings: dict, *, temperature: Optional[float] = None) -> ChatO
 # 会话存储
 # ======================================================================
 
+#: 未安装落盘 saver 时的提示。与 agent.MISSING_DEPS 一样写成可照做的命令。
+MISSING_SESSION_DEPS = (
+    "服务端会话需要 langgraph-checkpoint-sqlite，"
+    "请重新安装：pip install -r requirements-agent.txt"
+)
+
 #: 进程级单例。接入层每次请求都会重新装配 agent（配置可热重载），
 #: checkpointer 若跟着重建，会话就只能活一个请求。
-_CHECKPOINTER: Optional[InMemorySaver] = None
+#:
+#: 它由应用启动期注入（见 open_checkpointer 与 main.lifespan），而不是像
+#: feedback.get_store() 那样惰性自建：落盘的 saver 持有一条 aiosqlite 连接，
+#: 必须在**运行中的事件循环**里创建、并在进程退出时关闭。这两件事模块内部
+#: 都做不到——第一次用到它的时候已经在某个请求的中途了。
+_CHECKPOINTER: Optional[BaseCheckpointSaver] = None
+
+#: 打开会话库失败的原因，供 /api/health/detail 回答「会话为什么没生效」。
+_SESSION_ERROR: Optional[str] = None
 
 
-def default_checkpointer() -> InMemorySaver:
+@asynccontextmanager
+async def open_checkpointer(
+    path: Union[str, Path],
+) -> AsyncIterator[BaseCheckpointSaver]:
+    """
+    打开落盘的会话库，装成进程级单例，退出时关连接、清单例。
+
+    显式调一次 setup()：建表本来是惰性自动做的，但那样一来「目录没有写权限」
+    这类部署错误会推迟到用户第一次提问才暴露，表现成一次莫名的 500。
+    启动期的错误要在启动期报。它是幂等的，重复调用无副作用。
+
+    换 Postgres 只需改这里的两行（依赖与连接串）：
+        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+        async with AsyncPostgresSaver.from_conn_string(dsn) as saver:
+    调用方与 build_agent 都不受影响——两者都只认 BaseCheckpointSaver 接口。
+    """
+    global _CHECKPOINTER, _SESSION_ERROR
+
+    try:
+        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+    except ImportError as exc:  # pragma: no cover - 取决于环境是否装了该包
+        raise RuntimeError(MISSING_SESSION_DEPS) from exc
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    async with AsyncSqliteSaver.from_conn_string(str(path)) as saver:
+        await saver.setup()
+        _CHECKPOINTER = saver
+        _SESSION_ERROR = None
+        logger.info("会话库已就绪: %s", path)
+        try:
+            yield saver
+        finally:
+            _CHECKPOINTER = None
+
+
+def default_checkpointer() -> BaseCheckpointSaver:
+    """
+    取会话存储。
+
+    启动期注入过落盘实例就用它；没有则退回内存。退回而不是抛错，是因为
+    评测脚本、单元测试这类没有 ASGI 生命周期的入口也要能跑多轮会话，
+    而它们本来就不需要「重启后还在」。日志留一条，避免线上静默降级。
+    """
     global _CHECKPOINTER
     if _CHECKPOINTER is None:
+        logger.warning("会话库未初始化，本进程的会话退回内存存储（重启即清空）")
         _CHECKPOINTER = InMemorySaver()
     return _CHECKPOINTER
 
 
+def session_store_error() -> Optional[str]:
+    """打开会话库失败的原因；一切正常时为 None。"""
+    return _SESSION_ERROR
+
+
+def set_session_store_error(reason: Optional[str]) -> None:
+    """由接入层在启动期记下失败原因（见 main.lifespan）。"""
+    global _SESSION_ERROR
+    _SESSION_ERROR = reason
+
+
 def reset_default_checkpointer():
     """丢弃单例。供测试隔离用例之间的会话状态。"""
-    global _CHECKPOINTER
+    global _CHECKPOINTER, _SESSION_ERROR
     _CHECKPOINTER = None
+    _SESSION_ERROR = None
 
 
 # ======================================================================
 # 装配
 # ======================================================================
+
+#: 一次模型调用在图上占的 step 数。实测是 5：
+#: ModelCallLimitMiddleware.before_model、SummarizationMiddleware.before_model、
+#: model、ModelCallLimitMiddleware.after_model，模型要工具时再加一个 tools。
+#:
+#: 这个数字随 middleware 列表变化——每加一个带 before/after 钩子的中间件就多
+#: 一步。改动后不必手算，test_递归上限自动宽到让模型调用上限先触发 会直接失败。
+_STEPS_PER_MODEL_CALL = 5
+
+#: 收尾那一轮：ModelCallLimitMiddleware.before_model 发现超限、跳到 end，
+#: 这一跳本身也要占 step。
+_STEPS_TO_WIND_DOWN = 2
+
+#: 兜底被抬高时只警告一次。它每个请求都会算一遍，逐次打日志就是刷屏。
+_FLOOR_WARNED = False
+
+
+def max_model_calls(settings: dict) -> int:
+    """模型调用次数上限。装配与兜底推算共用，避免两处各写一遍默认值。"""
+    return max(2, int(settings.get("agent_max_model_calls", 6)))
+
+
+#: 最后一轮追加给模型的交代。不改 SYSTEM_PROMPT 本体，只在这一次调用上叠加。
+_FINAL_ROUND_NOTE = """
+【重要】本次是最后一轮，你已经没有工具可用了。请仅依据上面已经取到的资料作答。
+若资料不足以回答，就直接说明「已取到的资料不足以回答，缺的是……」，
+明确指出还缺什么，不要猜测、不要用自己的知识补全。
+"""
+
+
+class FinalAnswerOnLimitMiddleware(AgentMiddleware):
+    """
+    在最后一次允许的模型调用上把工具摘掉，逼模型用现有材料作答。
+
+    为什么需要它：ModelCallLimitMiddleware 的 exit_behavior="end" 并**不是**
+    「带着现有材料去作答」——它只是注入一条固定的英文提示消息然后跳到 end。
+    而那条消息是中间件节点的状态更新，astream 的 token 只取 model 节点
+    （摘要中间件的输出不能推给用户，见 astream 里的过滤），于是用户拿到的是
+    一个**空气泡**。对使用者来说，空回答比一句报错更难理解。
+
+    做法是拦在模型调用外面，在第 limit 次调用时 override 掉 tools。模型没有
+    工具可调，只能给出文本答案，于是：
+      - 答案照常从 model 节点流出，用户看到的是正常的流式回答；
+      - 不额外多花一次模型调用（这一次本来就在预算内）；
+      - ModelCallLimitMiddleware 退回成纯兜底——正常情况下轮不到它跳转。
+
+    只读 state 不写 state，所以不需要自己的 state_schema；
+    run_model_call_count 由 ModelCallLimitMiddleware 的 schema 提供，
+    它标了 UntrackedValue，不进 checkpoint，因此会话每一轮都是从 0 重新计数。
+    """
+
+    def __init__(self, limit: int, system_prompt: str) -> None:
+        super().__init__()
+        self._limit = limit
+        self._final_system = SystemMessage(
+            content=f"{system_prompt}\n{_FINAL_ROUND_NOTE}"
+        )
+
+    def _maybe_strip_tools(self, request):
+        # 第 k 次调用之前，计数是 k-1。所以「这一次就是第 limit 次」等价于
+        # 计数已经到了 limit-1。
+        if request.state.get("run_model_call_count", 0) < self._limit - 1:
+            return request
+        logger.info("已达模型调用上限 %d，最后一轮摘掉工具强制作答", self._limit)
+        return request.override(tools=[], system_message=self._final_system)
+
+    def wrap_model_call(self, request, handler):
+        return handler(self._maybe_strip_tools(request))
+
+    async def awrap_model_call(self, request, handler):
+        return await handler(self._maybe_strip_tools(request))
+
 
 def build_agent(engine: RAGEngine, settings: dict, model=None, checkpointer=None):
     """
@@ -170,14 +327,18 @@ def build_agent(engine: RAGEngine, settings: dict, model=None, checkpointer=None
 
     model 可注入，用于离线测试：替身只需是一个支持工具调用的 BaseChatModel。
     """
+    limit = max_model_calls(settings)
     middleware = [
         # 终止条件之一：模型调用次数。没有它，一个写歪的 prompt 就能让模型
-        # 反复调工具直到超时。exit_behavior="end" 是带着现有材料去作答，
-        # 而不是报错——不阻断问答比硬失败更稳。
-        ModelCallLimitMiddleware(
-            run_limit=max(2, int(settings.get("agent_max_model_calls", 6))),
-            exit_behavior="end",
-        ),
+        # 反复调工具直到超时。
+        #
+        # exit_behavior 选 "end" 而不是 "error"：不阻断问答比硬失败更稳。
+        # 但它自己的收场方式是注入一条固定提示就跳走，用户看到的是空回答，
+        # 所以真正负责「带着现有材料作答」的是下面那个中间件，
+        # 这一道退化成纯兜底——正常情况下轮不到它跳转。
+        ModelCallLimitMiddleware(run_limit=limit, exit_behavior="end"),
+        # 到了最后一轮就摘掉工具，逼模型用已取到的材料作答。理由见类文档。
+        FinalAnswerOnLimitMiddleware(limit, SYSTEM_PROMPT),
         # 上下文压缩：消息数超过阈值就把早期消息折叠成摘要，保留最近若干条原文。
         # 摘要用同一个端点，但温度固定为 0——摘要要的是稳定复现，不是多样性。
         SummarizationMiddleware(
@@ -266,9 +427,14 @@ class AgentRunner:
     没有中间态的 agent 在用户看来和卡死没有区别。
 
     事件类型：
-      tool  某个工具返回了            token 生成的文本片段
-      reset 刚才那段文本是取材前的开场白，客户端应当丢弃缓冲重新开始
-      done  结束，带 stages          error 运行失败
+      tool      某个工具返回了        token 生成的文本片段
+      plan      这一轮打算调的工具    reasoning 模型的思考过程（非答案正文）
+      reset     刚才那段文本是取材前的开场白，客户端应当丢弃缓冲重新开始
+      done      结束，带 stages       error     运行失败
+
+    reasoning 单独分一型而不是混进 token：思考内容不是答案，落进反馈库、
+    进 chatHistory 或被当成答案渲染都是错的。分开之后客户端可以把它收进
+    一个折叠区，而调用方（评测、留痕）只认 token 就行，不必再去剥标签。
 
     reset 存在的理由：模型在决定调工具那一轮也可能先说一句「我查一下」，
     这段话会先于工具调用被流式推出去。不发 reset 的话它会粘在最终答案前面。
@@ -292,9 +458,39 @@ class AgentRunner:
         return self._agent
 
     @property
+    def max_model_calls(self) -> int:
+        return max_model_calls(self._settings)
+
+    @property
     def recursion_limit(self) -> int:
-        """图层面的兜底，与模型调用次数上限管的不是同一类失效。"""
-        return max(4, int(self._settings.get("agent_recursion_limit", 25)))
+        """
+        图层面的兜底，与模型调用次数上限管的不是同一类失效——但**必须比它宽**。
+
+        两者都是终止条件，区别在收场方式：模型调用上限是带着现有材料去作答，
+        递归上限是直接报错中止。所以兜底一旦比它先触发，用户拿到的就不是答案
+        而是一句「达到递归上限」，那条优雅收尾的路径等于永远走不到。
+
+        它比想象中容易发生：一次模型调用在图上不是一步，而是
+        _STEPS_PER_MODEL_CALL 步。默认的 6 次调用需要 32，而原先的默认值是 25,
+        于是默认配置下每一次「模型停不下来」都报错收场——这正是本项目踩过的坑。
+
+        因此这里取「配置值」与「算得出来的下限」的较大者。两个开关仍然各自独立
+        可配，只是不允许配出一个让优雅收尾失效的组合。
+        """
+        global _FLOOR_WARNED
+
+        configured = max(4, int(self._settings.get("agent_recursion_limit", 25)))
+        floor = _STEPS_PER_MODEL_CALL * self.max_model_calls + _STEPS_TO_WIND_DOWN
+        if configured < floor and not _FLOOR_WARNED:
+            _FLOOR_WARNED = True
+            logger.warning(
+                "agent_recursion_limit=%d 太小，不足以让 agent_max_model_calls=%d "
+                "优雅收尾，已按 %d 生效。调大模型调用上限时请一并调大它。",
+                configured,
+                self.max_model_calls,
+                floor,
+            )
+        return max(configured, floor)
 
     def _config(self, session_id: Optional[str]) -> dict:
         cfg: dict = {"recursion_limit": self.recursion_limit}
@@ -357,6 +553,9 @@ class AgentRunner:
         # 这是近似值（不含框架自身的调度开销），但足以回答唯一重要的那个
         # 问题：这几十秒是花在模型上还是花在检索上。
         last_update = time.perf_counter()
+        # 思考内容有两种到达方式（取决于端点实现），两种都要接：
+        # 独立字段走 _reasoning_of，混在正文里的 <think> 标签走这个切分器。
+        thinking = _ThinkSplitter()
 
         try:
             async for mode, chunk in self._agent.astream(
@@ -370,9 +569,11 @@ class AgentRunner:
                     # 那段输出是内部产物，推给用户就是一段莫名其妙的英文摘要。
                     if meta.get("langgraph_node") != "model":
                         continue
-                    text = _text_of(message)
-                    if text:
-                        yield {"type": "token", "content": text}
+                    reasoning = _reasoning_of(message)
+                    if reasoning:
+                        yield {"type": "reasoning", "content": reasoning}
+                    for kind, piece in thinking.feed(_text_of(message)):
+                        yield {"type": kind, "content": piece}
                 elif mode == "updates":
                     now = time.perf_counter()
                     for node, update in (chunk or {}).items():
@@ -386,6 +587,10 @@ class AgentRunner:
                         ):
                             yield event
                     last_update = now
+            # 标签没闭合时切分器手里还压着一段（它分不清那是正文还是半个标签），
+            # 流结束了就没有后续能澄清，一律当正文吐出去——宁可多一段也不吞字。
+            for kind, piece in thinking.flush():
+                yield {"type": kind, "content": piece}
         except GraphRecursionError as exc:
             logger.error("Agent 触发递归上限: %s", exc)
             yield {
@@ -524,6 +729,85 @@ def _text_of(message) -> str:
         if isinstance(b, dict) and b.get("type") == "text"
     ]
     return "".join(parts)
+
+
+#: 独立字段承载思考内容时用的键名。各家实现没有统一：DeepSeek 系叫
+#: reasoning_content，Ollama 与部分 OpenAI 兼容网关叫 reasoning。
+#: langchain 不认识这些非标准字段，原样堆在 additional_kwargs 里。
+_REASONING_KEYS = ("reasoning_content", "reasoning")
+
+
+def _reasoning_of(message) -> str:
+    """取消息里的思考内容；端点不吐这个字段时返回空串。"""
+    extra = getattr(message, "additional_kwargs", None) or {}
+    for key in _REASONING_KEYS:
+        value = extra.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+class _ThinkSplitter:
+    """
+    把流式文本切成「思考」与「正文」两股。
+
+    qwen3 这类模型在 OpenAI 兼容端点上常常不给独立字段，而是把思考直接写在
+    正文里用 <think></think> 包起来。不切开的话，用户看到的答案前面会挂着
+    一大段自言自语，落进反馈库和 chatHistory 的也是这段脏文本。
+
+    难点只有一个：标签会被切片切断（"<thi" + "nk>"）。所以每次只吐出
+    「确定不可能是半个标签」的那部分，剩下的尾巴留到下一片再判断。
+    """
+
+    _OPEN = "<think>"
+    _CLOSE = "</think>"
+
+    def __init__(self) -> None:
+        self._inside = False
+        self._pending = ""
+
+    def feed(self, text: str) -> list[tuple[str, str]]:
+        """喂一片文本，返回若干 (事件类型, 文本) —— 类型是 token 或 reasoning。"""
+        out: list[tuple[str, str]] = []
+        if not text:
+            return out
+        self._pending += text
+        while self._pending:
+            tag = self._CLOSE if self._inside else self._OPEN
+            index = self._pending.find(tag)
+            if index >= 0:
+                self._emit(out, self._pending[:index])
+                self._pending = self._pending[index + len(tag) :]
+                self._inside = not self._inside
+                continue
+            hold = _tag_prefix_len(self._pending, tag)
+            if hold:
+                self._emit(out, self._pending[:-hold])
+                self._pending = self._pending[-hold:]
+            else:
+                self._emit(out, self._pending)
+                self._pending = ""
+            break
+        return out
+
+    def flush(self) -> list[tuple[str, str]]:
+        """流结束，把压着的尾巴吐干净。"""
+        out: list[tuple[str, str]] = []
+        self._emit(out, self._pending)
+        self._pending = ""
+        return out
+
+    def _emit(self, out: list[tuple[str, str]], text: str) -> None:
+        if text:
+            out.append(("reasoning" if self._inside else "token", text))
+
+
+def _tag_prefix_len(text: str, tag: str) -> int:
+    """text 末尾有多少个字符可能是 tag 的开头（可能被下一片补全）。"""
+    for n in range(min(len(tag) - 1, len(text)), 0, -1):
+        if tag.startswith(text[-n:]):
+            return n
+    return 0
 
 
 def _update_events(

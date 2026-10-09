@@ -78,14 +78,27 @@ class ScriptedChatModel(BaseChatModel):
         return "scripted"
 
     def bind_tools(self, tools, **kwargs):
-        self.log["bound_tools"] = [getattr(t, "name", str(t)) for t in tools]
-        return self
+        names = [getattr(t, "name", str(t)) for t in tools]
+        self.log["bound_tools"] = names
+        # 逐次记录，供「最后一轮有没有被摘掉工具」这类断言查看
+        self.log.setdefault("bind_history", []).append(names)
+        # 返回 bind 出来的 Runnable 而不是 self：真实模型把工具清单透传进这一次
+        # 调用，_generate 才看得见「这一次有没有工具」。返回 self 会让
+        # 「上一轮绑过工具」一直生效——而 langchain 在 tools 为空时根本不调
+        # bind_tools，于是「最后一轮摘掉工具」这件事就永远测不出来。
+        return self.bind(tools=names)
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
         self.log["calls"] += 1
         self.log.setdefault("seen", []).append(messages)
-        index = min(self.log["calls"] - 1, len(self.script) - 1)
-        return ChatResult(generations=[ChatGeneration(message=self.script[index])])
+        # 这一次没有工具就不能返回 tool_calls。真实模型做不到的事替身也不该做，
+        # 否则「摘掉工具逼它作答」这条路径测不出来。
+        if not kwargs.get("tools"):
+            msg = AIMessage(content="（无工具可用）基于现有资料的收尾回答")
+        else:
+            index = min(self.log["calls"] - 1, len(self.script) - 1)
+            msg = self.script[index]
+        return ChatResult(generations=[ChatGeneration(message=msg)])
 
 
 def tool_call(name: str, args: dict, call_id: str = "call_1") -> AIMessage:
@@ -141,6 +154,109 @@ async def test_search_docs_空结果不是失败(make_engine, settings):
     # ok=True 而 empty=True：执行成功，只是确实没有内容
     assert artifact["ok"] is True and artifact["empty"] is True
     assert artifact["contexts"] == []
+
+
+async def test_search_docs_空结果不替模型断言知识库里没有(make_engine, settings):
+    """
+    语义检索没命中也可能只是问句用词和文档对不上。把「知识库里没有相关资料」
+    写死在工具返回里，等于用一次向量检索的结果替模型下了终局结论——
+    而这正是 README 里点名要避免的那类静默失败。
+    """
+    out, _ = await agent_tools.search_docs(
+        make_engine(), settings, query="Kubernetes 集群怎么部署"
+    )
+
+    assert "不一定代表" in out
+    assert "find_literal" in out, "没命中时要给出下一步，而不是只说没命中"
+
+
+# ---- 命中质量信号 ----
+#
+# 向量检索的语义是「返回最相似的 K 条」而不是「返回相关的条目」，所以
+# 知识库里没有的问题照样拿到 top_k 个片段。没有质量信号时模型分辨不出来，
+# 会挨个换工具重试直到撞上调用次数上限。
+
+def _hit(rerank_score, score_type="rerank"):
+    """构造一条带指定重排分的命中。"""
+    from rag_engine import Retrieved
+
+    return Retrieved(
+        text="正文",
+        source="运维手册.md",
+        heading="超时设置",
+        similarity=0.6,
+        bm25_score=None,
+        rrf_score=None,
+        rerank_score=rerank_score,
+        score=rerank_score if rerank_score is not None else 0.0,
+        score_type=score_type,
+        doc_id="d1",
+    )
+
+
+def test_命中质量高时不附提示(settings):
+    note = agent_tools._confidence_note(
+        [_hit(5.7)], {**settings, "agent_low_confidence_score": 1.0}
+    )
+
+    assert note == ""
+
+
+def test_命中质量存疑时给出一条明确的下一步(settings):
+    """
+    提示要给**一条**具体的下一步。泛泛说「再找找」只会让模型把剩下的工具
+    都试一遍——那正是这个提示要消除的行为。
+    """
+    note = agent_tools._confidence_note(
+        [_hit(-3.6)], {**settings, "agent_low_confidence_score": 1.0}
+    )
+
+    assert "find_literal" in note
+    assert "硬凑" in note, "低分片段最危险的用法是被当成依据编出有出处的答案"
+
+
+def test_重排关闭时不提示(settings):
+    """
+    余弦受语料与模型分布影响（实测无关问题的余弦能比库内问题还高），
+    而 RRF 只用名次、完全丢弃幅度——任何查询的 top1 拿到的分都一样。
+    两者都不能当阈值，所以宁可不提示，也不换个分数凑合。
+    """
+    low = {**settings, "agent_low_confidence_score": 1.0}
+
+    assert agent_tools._confidence_note([_hit(None, "cosine")], low) == ""
+    assert agent_tools._confidence_note([_hit(None, "rrf")], low) == ""
+
+
+async def test_命中质量存疑时结果照常返回(engine, settings, monkeypatch):
+    """
+    只提示、不过滤——这是校准数据定的。硬过滤能挡住全部「同领域但库里没有」
+    的问题，但会误杀库内两类文档：标题带格式噪声的、以及只有两三块的小文档。
+    漏答比慢几分钟严重得多。
+    """
+    from dataclasses import replace
+
+    real = engine.retrieve_with_diagnostics
+
+    async def low_scored(query, *args, **kwargs):
+        # 测试用 hashing 嵌入、不加载重排模型，所以命中的分数要自己伪造
+        result = await real(query, *args, **kwargs)
+        result["hits"] = [
+            replace(hit, rerank_score=-2.0, score_type="rerank")
+            for hit in result["hits"]
+        ]
+        return result
+
+    monkeypatch.setattr(engine, "retrieve_with_diagnostics", low_scored)
+
+    out, artifact = await agent_tools.search_docs(
+        engine, {**settings, "agent_low_confidence_score": 1.0},
+        query="REQUEST_TIMEOUT 是多少",
+    )
+
+    assert "相关性偏低" in out
+    assert artifact["contexts"], "提示不等于丢结果，片段必须还在"
+    assert artifact["meta"]["low_confidence"] is True
+    assert artifact["meta"]["top_rerank_score"] == -2.0
 
 
 async def test_search_docs_超预算时截断并声明(engine, settings):
@@ -488,6 +604,78 @@ async def test_取材前的开场白不会粘进答案(engine):
     assert any(e["type"] == "reset" for e in result["events"])
 
 
+async def test_思考内容不进答案而是单独成事件(engine):
+    """
+    qwen3 这类模型在 OpenAI 兼容端点上把思考直接写在正文里用 <think> 包着。
+    不切开的话，答案前面挂着一大段自言自语，落进反馈库和 chatHistory 的
+    也是这段脏文本——而它恰恰是排查「模型为什么想歪了」最有用的东西，
+    所以要留下来，只是不能留在答案里。
+    """
+    runner = make_runner(
+        engine,
+        [AIMessage(content="<think>用户问的是超时配置，先查文档。</think>默认 60 秒。")],
+    )
+
+    result = await runner.run("REQUEST_TIMEOUT 默认多少秒？")
+
+    assert result["answer"].strip() == "默认 60 秒。"
+    thinking = "".join(
+        e["content"] for e in result["events"] if e["type"] == "reasoning"
+    )
+    assert "先查文档" in thinking
+
+
+async def test_思考走独立字段时也能取到(engine):
+    """DeepSeek 系叫 reasoning_content，Ollama 叫 reasoning，两种都得认。"""
+    runner = make_runner(
+        engine,
+        [
+            AIMessage(
+                content="默认 60 秒。",
+                additional_kwargs={"reasoning_content": "先确认是哪个超时。"},
+            )
+        ],
+    )
+
+    result = await runner.run("REQUEST_TIMEOUT 默认多少秒？")
+
+    assert result["answer"].strip() == "默认 60 秒。"
+    assert any(
+        e["type"] == "reasoning" and "先确认" in e["content"] for e in result["events"]
+    )
+
+
+def test_标签被切片切断时不漏字也不串型():
+    """
+    流式下 "<think>" 会被切成 "<thi" + "nk>"。切分器若按片判断，
+    半个标签要么被当正文吐出去、要么整段思考被误判成答案——
+    两种都是用户直接看得见的错。
+    """
+    from agent.runner import _ThinkSplitter
+
+    splitter = _ThinkSplitter()
+    out = []
+    for piece in ["<thi", "nk>想一", "想</thi", "nk>答案", "在此"]:
+        out.extend(splitter.feed(piece))
+    out.extend(splitter.flush())
+
+    joined = {}
+    for kind, text in out:
+        joined[kind] = joined.get(kind, "") + text
+    assert joined == {"reasoning": "想一想", "token": "答案在此"}
+
+
+def test_标签没闭合时剩下的文字照样吐出去():
+    """流断在标签中间是常态。宁可多一段思考，也不能把字吞掉。"""
+    from agent.runner import _ThinkSplitter
+
+    splitter = _ThinkSplitter()
+    out = splitter.feed("<think>想到一半就断了")
+    out.extend(splitter.flush())
+
+    assert "".join(text for _, text in out) == "想到一半就断了"
+
+
 async def test_闲聊不取材(engine):
     """
     省掉一整轮检索的这条路径是 agent 相对固定管道的主要收益之一，
@@ -522,8 +710,12 @@ async def test_工具失败被记进stages并照样收尾(engine):
 
 async def test_同一thread_id跨轮记住上一问(engine):
     """
-    这正是接 InMemorySaver 的目的。第二轮只传新问题，
+    这正是接 checkpointer 的目的。第二轮只传新问题，
     上一轮的问答必须由 checkpointer 恢复进消息列表。
+
+    这里用 InMemorySaver 而不是落盘实现：跨轮恢复是 BaseCheckpointSaver
+    的接口语义，两种存储都得满足，用内存版跑得更快。落盘特有的行为
+    （重启后还在）由 test_会话库重开后仍能读到上一轮 覆盖。
     """
     from langgraph.checkpoint.memory import InMemorySaver
 
@@ -558,6 +750,81 @@ async def test_不同thread_id互不串话(engine):
     assert not any("甲的问题" in t for t in texts)
 
 
+async def test_会话库重开后仍能读到上一轮(engine, tmp_path):
+    """
+    换掉内存存储换来的唯一东西：重启进程不丢会话。
+
+    两个先后打开、指向同一个文件的 saver 就是「重启」的最小模型——
+    第二个实例是全新的连接和全新的进程内状态，能读到上一轮只可能来自磁盘。
+    """
+    from agent.runner import open_checkpointer
+
+    db = tmp_path / "sessions.db"
+    script = [AIMessage(content="第一轮回答"), AIMessage(content="第二轮回答")]
+
+    async with open_checkpointer(db) as saver:
+        first = make_runner(engine, script, checkpointer=saver)
+        await first.run("REQUEST_TIMEOUT 是多少？", session_id="thread-1")
+
+    assert db.exists(), "会话库文件没有被创建"
+
+    async with open_checkpointer(db) as saver:
+        second = make_runner(engine, script, checkpointer=saver)
+        await second.run("那 NSR_REFRESH_TIMER 呢？", session_id="thread-1")
+
+    texts = [str(getattr(m, "content", "")) for m in second.model.log["seen"][-1]]
+    assert any("REQUEST_TIMEOUT 是多少？" in t for t in texts)
+    assert any("第一轮回答" in t for t in texts)
+
+
+async def test_会话库未打开时退回内存存储(tmp_path):
+    """
+    没有 ASGI 生命周期的入口（评测脚本、单元测试）也要能跑多轮会话。
+    退回内存是有意的降级，不是抛错——但块内必须拿到落盘那一个，
+    否则 lifespan 注入的实例就白开了。
+    """
+    from langgraph.checkpoint.memory import InMemorySaver
+    from agent.runner import default_checkpointer, open_checkpointer
+
+    assert isinstance(default_checkpointer(), InMemorySaver)
+
+    reset_default_checkpointer()
+    async with open_checkpointer(tmp_path / "sessions.db") as saver:
+        assert default_checkpointer() is saver
+
+    # 出了块连接已经关掉，绝不能继续把它当单例发出去
+    assert isinstance(default_checkpointer(), InMemorySaver)
+
+
+def test_会话库打不开时服务仍然起得来(monkeypatch, tmp_path):
+    """
+    部署准则和引擎一致：配置问题不能让进程起不来，否则用户没有任何途径
+    通过 UI 补救。失败要变成 /api/health/detail 里的一条原因，而不是崩溃。
+    """
+    from fastapi.testclient import TestClient
+
+    import agent
+    import config
+    import main
+
+    # 走 settings.json 而不是改 DEFAULTS：lifespan 读的是 load_settings()，
+    # 而 isolated_settings_file 已经把它指向了本用例独占的临时文件。
+    settings = config.load_settings()
+    settings.update(agent_enabled=True, agent_session_enabled=True)
+    config.save_settings(settings)
+    monkeypatch.setattr(config, "AGENT_SESSION_DB", tmp_path / "sessions.db")
+
+    def boom(_path):
+        raise RuntimeError("磁盘只读")
+
+    monkeypatch.setattr(agent, "open_session_store", boom)
+
+    with TestClient(main.app) as client:
+        body = client.get("/api/health/detail").json()
+
+    assert "磁盘只读" in body["agent"]["session_error"]
+
+
 async def test_无会话时用前端传来的history(engine):
     """agent_session_enabled 关闭时沿用原有行为：历史由前端维护、服务端不存。"""
     runner = make_runner(engine, [AIMessage(content="回答")])
@@ -589,6 +856,82 @@ async def test_模型调用次数上限能刹住循环(engine):
 
     assert result["error"] is None
     assert runner.model.log["calls"] <= 3
+
+
+#: 每轮换一个 tool_call id，模拟「模型每轮都真的要工具」这种最坏情况。
+#: 复用同一个 id 会让 tools 节点只跑一次，把图走短了，测不出真实步数。
+_GREEDY_SCRIPT = [
+    tool_call("search_docs", {"query": f"超时{i}"}, call_id=f"call_{i}")
+    for i in range(120)
+]
+
+
+@pytest.mark.parametrize("calls", [2, 6, 20])
+async def test_递归上限自动宽到让模型调用上限先触发(engine, calls):
+    """
+    两道终止条件的**顺序**：调用上限带着材料作答，递归上限直接报错中止。
+    兜底先触发的话，那条优雅收尾的路径就是死代码——用户看到的是
+    「Agent 达到递归上限 25 仍未结束」，而不是答案。
+
+    这是真实踩过的坑：默认 max_model_calls=6 需要 32 步，而默认兜底是 25，
+    于是默认配置下每一次「模型停不下来」都报错收场。
+
+    这里故意把兜底配成一个明显不够的值，验证运行期会把它抬到下限之上。
+    参数覆盖最小值、生产默认值和 /api/settings 允许的最大值——最后这个
+    算出来是 102，已经超过接口对该字段的 le=100，所以只能在运行期兜住。
+    """
+    runner = make_runner(
+        engine,
+        _GREEDY_SCRIPT,
+        settings={"agent_max_model_calls": calls, "agent_recursion_limit": 4},
+    )
+
+    assert runner.recursion_limit >= 5 * calls + 2
+
+    result = await runner.run("死循环测试")
+
+    assert result["error"] is None, "兜底先触发了，优雅收尾没走到"
+    # 用 >= 而不是 ==：消息数超过 summary_trigger 后 SummarizationMiddleware
+    # 也会调模型，而替身是同一个实例，那几次摘要调用一并记在这个计数里。
+    # 它们不占图的 step，所以不影响上面的下限。
+    assert runner.model.log["calls"] >= calls, "没跑满就停了，上限不是被它刹住的"
+
+
+async def test_到达调用上限时给出答案而不是空回答(engine):
+    """
+    刹住循环之后必须有答案。
+
+    ModelCallLimitMiddleware 的 exit_behavior="end" 只注入一条固定提示就跳到
+    end，而那条消息不经过 model 节点、拿不到 token，用户看到的是一个空气泡——
+    这是真实踩过的坑，比报错更难理解。所以最后一轮要摘掉工具逼模型作答。
+    """
+    runner = make_runner(
+        engine,
+        _GREEDY_SCRIPT,
+        settings={"agent_max_model_calls": 4},
+    )
+
+    result = await runner.run("死循环测试")
+
+    assert result["error"] is None
+    assert result["answer"].strip(), "刹住了但没有答案，用户看到的是空气泡"
+    assert runner.model.log["calls"] == 4
+    # 前三轮照常带着三个工具；最后一轮的 tools 是空的，而 langchain 在工具为空
+    # 时干脆不调 bind_tools，所以这里应该只有 3 条记录——少的那条就是被摘掉的。
+    history = runner.model.log["bind_history"]
+    assert len(history) == 3, f"摘工具的轮次不对: {history}"
+    assert all(len(h) == 3 for h in history), f"前几轮不该被动过: {history}"
+
+
+async def test_递归上限够大时不被改动(engine):
+    """抬高只在配置不够时发生。配得比下限大就该原样生效，它仍是独立开关。"""
+    runner = make_runner(
+        engine,
+        _GREEDY_SCRIPT,
+        settings={"agent_max_model_calls": 6, "agent_recursion_limit": 80},
+    )
+
+    assert runner.recursion_limit == 80
 
 
 async def test_三个工具被绑给模型(engine):

@@ -138,9 +138,17 @@ html,body{height:100%;font-family:'Inter',system-ui,-apple-system,sans-serif;bac
 .typing-dot:nth-child(3){animation-delay:.4s;margin-right:0}
 @keyframes blink{0%,80%,100%{opacity:.3}40%{opacity:1}}
 
-/* Agent 取材进度轨迹：答案出现前的中间态，正文出现后即被替换 */
+/* Agent 的思考与取材轨迹。答完之后不擦掉、只收起来：它是「这个答案怎么来的」
+   的唯一现场，用户要核对工具选得对不对、模型是不是想歪了，只能看它。 */
 .agent-trace{color:var(--text-light);font-size:12px;line-height:1.8;margin-bottom:8px;
   padding-left:8px;border-left:2px solid var(--border)}
+.agent-trace>summary{cursor:pointer;list-style:none;user-select:none;color:var(--text-light)}
+.agent-trace>summary::-webkit-details-marker{display:none}
+.agent-trace>summary::before{content:'▸ ';display:inline-block;width:1em}
+.agent-trace[open]>summary::before{content:'▾ '}
+/* 思考可以很长，给个上限并让它自己滚，否则答案会被推到屏幕外 */
+.agent-think{white-space:pre-wrap;max-height:220px;overflow-y:auto;margin:4px 0;
+  padding:6px 8px;background:#f9fafb;border-radius:6px;color:var(--text-light)}
 
 /* 反馈条：贴在答案气泡下面，平时很淡，鼠标移到整条消息上才显出来。
    它不能抢注意力——但也不能藏到用户找不着，所以是「淡」而不是「隐藏」。 */
@@ -833,11 +841,42 @@ async function sendMessage() {
      没有中间态的 agent 在用户看来和卡死没有区别，所以把工具事件
      渲染成一条进度轨迹；它同时也是排查 agent 走错路时最直接的证据。 */
   let trace = [];
+  /* 思考内容（reasoning 事件）。它不是答案：不进 full、不进 chatHistory，
+     只在折叠区里显示。 */
+  let thinking = '';
+  /* 气泡被拆成「轨迹」和「答案」两块各自更新，而不是每片都重写整个 innerHTML：
+     details 的展开状态存在元素上，整体重写会在每个 token 把用户刚点开的折叠区
+     重新合上。 */
+  let parts = null;
+  const bubbleParts = () => {
+    if (!parts) {
+      bubble.innerHTML = '';
+      const details = document.createElement('details');
+      details.className = 'agent-trace';
+      details.open = true;
+      details.innerHTML = '<summary>思考与取材过程</summary><div class="trace-body"></div>';
+      const answer = document.createElement('div');
+      bubble.append(details, answer);
+      parts = { details, body: details.querySelector('.trace-body'), answer };
+    }
+    return parts;
+  };
   const renderBubble = () => {
-    const head = trace.length
-      ? `<div class="agent-trace">${trace.map(escapeHtml).join('<br>')}</div>`
-      : '';
-    bubble.innerHTML = head + renderMarkdown(full);
+    /* 还什么都没来，留着打字动画——空气泡看起来像卡死了 */
+    if (!full && !trace.length && !thinking) return;
+    if (!trace.length && !thinking) {
+      bubble.innerHTML = renderMarkdown(full);
+      parts = null;
+      return;
+    }
+    const p = bubbleParts();
+    p.body.innerHTML =
+      (thinking ? `<div class="agent-think">${escapeHtml(thinking)}</div>` : '') +
+      trace.map(t => escapeHtml(t)).join('<br>');
+    /* 思考还在往下长时贴着底，不然用户盯着的是最早那几行 */
+    const think = p.body.querySelector('.agent-think');
+    if (think) think.scrollTop = think.scrollHeight;
+    p.answer.innerHTML = renderMarkdown(full);
   };
   try {
     const res = await fetch('/api/chat', {
@@ -872,6 +911,8 @@ async function sendMessage() {
           /* reset：刚才那段文本是模型在取材前说的开场白，不是答案 */
           if (obj.type === 'reset') { full = ''; continue; }
           if (obj.type === 'meta') { traceId = obj.trace_id || traceId; continue; }
+          /* 思考只进折叠区。放在 content 判断之前——它同样带 content 字段 */
+          if (obj.type === 'reasoning') { thinking += obj.content || ''; continue; }
           if (obj.content) full += obj.content;
           else {
             const line = describeAgentEvent(obj);
@@ -886,10 +927,12 @@ async function sendMessage() {
     full = `连接错误: ${e.message}`;
   }
 
-  trace = [];
-  bubble.innerHTML = renderMarkdown(full || '（无响应）');
+  full = full || '（无响应）';
+  renderBubble();
+  /* 答完就把轨迹收起来：过程该留档，但占据版面的应该是答案 */
+  if (parts) parts.details.open = false;
   bubble.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el));
-  /* 反馈条在最终渲染之后挂：上面那行 innerHTML 会把气泡内容整体重写，
+  /* 反馈条在最终渲染之后挂：renderBubble 会重写气泡内容，
      先挂就会被冲掉——而且不会报错，只是按钮无声消失。 */
   attachFeedback(bubble, traceId);
   messagesDiv.scrollTop = messagesDiv.scrollHeight;

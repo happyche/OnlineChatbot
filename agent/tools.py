@@ -238,6 +238,47 @@ def _stitch(chunks: list[dict], max_overlap: int) -> str:
     return "\n".join(p for p in parts if p.strip())
 
 
+def _confidence_note(hits: list, settings: dict) -> str:
+    """
+    命中质量存疑时，附一句**带方向**的提示；否则返回空串。
+
+    为什么需要它：向量检索的语义是「返回最相似的 K 条」，不是「返回相关的条目」。
+    知识库里没有的问题照样会拿到 top_k 个片段，而且往往主题沾边、读起来通顺，
+    模型分辨不出来，于是挨个换工具重试直到撞上调用次数上限——几分钟只换来
+    一句「不知道」。给它一个显式的质量信号，这一轮就能判。
+
+    为什么看重排分而不看别的：四个分数里只有它有绝对含义。余弦受语料与模型
+    分布影响（实测无关问题的余弦能比库内问题还高），BM25 是词频量纲，
+    而 RRF 只用名次、完全丢弃幅度——任何查询的 top1 拿到的 RRF 分都一样，
+    拿它当阈值是零信息量。所以重排关掉时这里直接不提示，而不是换个分数凑合。
+
+    为什么只提示不过滤：见 config.agent_low_confidence_score 的注释。
+
+    提示措辞上刻意做了两件事：给出**一条**具体的下一步（而不是泛泛的「再找找」，
+    那只会让它把剩下的工具都试一遍），以及明说「不要硬凑」——低分片段最危险的
+    用法不是被丢弃，而是被当成依据编出一个看着有出处的答案。
+    """
+    if not hits:
+        return ""
+    top = hits[0]
+    if getattr(top, "score_type", "") != "rerank":
+        return ""
+    score = getattr(top, "rerank_score", None)
+    if score is None:
+        return ""
+
+    threshold = float(settings.get("agent_low_confidence_score", 1.0))
+    if score >= threshold:
+        return ""
+    return (
+        f"\n\n注意：本次命中相关性偏低（重排最高分 {score:.1f}，低于 {threshold:g}），"
+        "上面这些片段很可能与问题无关。"
+        "若问题涉及精确串（错误码、命令、参数名、配置项），用 find_literal 再确认一次；"
+        "若不属此类或已确认过，请直接说明知识库中没有相关内容，"
+        "不要从上面的片段里硬凑答案。"
+    )
+
+
 def _payload_budget(settings: dict) -> int:
     return max(100, int(settings.get("agent_tool_payload_tokens", 1200)))
 
@@ -271,9 +312,15 @@ async def search_docs(
         hits = hits[:top_k]
 
     if not hits:
-        # 成功执行、确实没有内容。这不是错误——它恰恰是拒答的依据。
+        # 成功执行、确实没有内容。这不是错误——它是拒答的依据。
+        #
+        # 但措辞不能替模型下「知识库里没有」这个结论：语义检索受措辞影响，
+        # 没命中也可能只是问句用词和文档对不上。所以给的是下一步，不是判决。
         return _empty(
-            "search_docs", f"检索「{query}」未命中任何内容，知识库里没有相关资料。"
+            "search_docs",
+            f"检索「{query}」未命中任何内容。语义检索受措辞影响，这不一定代表"
+            "知识库里没有——若问题涉及精确串（错误码、命令、参数名）可用 "
+            "find_literal 再确认一次，否则可判定知识库中没有相关内容。",
         )
 
     items = [
@@ -282,9 +329,22 @@ async def search_docs(
     kept, truncated = _pack_items(items, _payload_budget(settings))
     head = f"[search_docs] 检索「{query}」命中 {len(hits)} 个片段"
     tail = "\n…（结果已按长度上限截断）" if truncated else ""
+    note = _confidence_note(hits, settings)
+    top_score = getattr(hits[0], "rerank_score", None)
     return (
-        f"{head}\n{_render(kept)}{tail}",
-        _artifact("search_docs", kept, truncated, {"hits": len(hits)}),
+        f"{head}\n{_render(kept)}{tail}{note}",
+        _artifact(
+            "search_docs",
+            kept,
+            truncated,
+            {
+                "hits": len(hits),
+                # 进 artifact 不进 prompt：评测要能统计「低置信度命中占多少」，
+                # 而这个数字对模型没有额外价值——提示里已经把结论说了。
+                "top_rerank_score": top_score,
+                "low_confidence": bool(note),
+            },
+        ),
     )
 
 

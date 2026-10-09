@@ -34,6 +34,9 @@ os.environ["LLM_PROVIDER"] = "openai"
 # 表现成一个莫名其妙的 401。需要 agent 的用例自己注入假模型。
 os.environ["AGENT_ENABLED"] = "false"
 os.environ["AGENT_SESSION_ENABLED"] = "false"
+# 会话库指向临时目录。开关是关的、正常不会建库，但一旦有用例把它打开，
+# 落盘的位置必须是临时目录而不是开发者的 data/ 下
+os.environ["AGENT_SESSION_DB"] = str(_TMP_ROOT / "sessions.db")
 # 指向临时目录，避免污染开发者本地的向量库、上传文件和配置
 os.environ["SETTINGS_FILE"] = str(_TMP_ROOT / "settings.json")
 os.environ["UPLOADS_DIR"] = str(_TMP_ROOT / "uploads")
