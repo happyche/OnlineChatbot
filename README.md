@@ -75,7 +75,7 @@ ADMIN_ENABLED=true python main.py                # 同上（bash）
 ```
 
 典型用法是：平时以使用者模式对外提供服务；要加文档或改模型时，停掉并以管理模式起一次，
-配好之后再切回来。配置落在 `settings.json`、向量库落在 Chroma 目录，
+配好之后再切回来。配置落在 `settings.json`、向量库落在 Qdrant（本地目录或独立服务），
 所以切回使用者模式读到的就是刚配好的结果。
 
 > **不是靠前端隐藏做到的。** 关闭时管理端点整个 router 不注册，路径返回 404 而不是 403
@@ -88,8 +88,9 @@ ADMIN_ENABLED=true python main.py                # 同上（bash）
 > 这套隔离与 `APP_API_TOKEN` 是两回事：前者管「这份部署有没有管理面」，
 > 后者管「谁能调接口」，公网暴露时两个都要配。
 
-**不要同时起两份**（例如再开一个端口跑管理模式）：两个进程会争用同一个 Chroma 目录，
-而且使用者那份在启动时就持有了 collection，管理实例新上传的文档它要重启才看得到。
+**不要同时起两份**（例如再开一个端口跑管理模式）：Qdrant 本地模式下同一目录只能被一个进程打开，
+第二份会直接启动失败；连的是 Qdrant 服务时虽然能起来，但 BM25 索引在各进程内存里，
+管理实例新上传的文档，使用者那份的混合检索要重启才看得到。
 
 ## 测试
 
@@ -179,7 +180,8 @@ python scripts/ragas_eval.py --questions eval/questions.example.jsonl \
 | `expand_section` | 「这一节的完整步骤是什么」——把命中片段还原成整节，步骤跨片段时 `top_k` 调多大都没用 |
 | `find_literal` | 「所有出现 X 的地方」——要列全，`top_k` 会悄悄截断 |
 
-三个工具的过滤都下推给向量库，代价与语料规模解耦。
+按文档、章节的过滤都下推给向量库；`find_literal` 的子串判断在进程内做
+（Qdrant 的全文匹配是分词匹配，对中文和标识符片段不是子串语义）。
 `expand_section` 只能扩展 `search_docs` 已经命中的片段，
 所以典型流程是「检索定位 → 扩展取全」的两轮取材。
 
@@ -314,7 +316,7 @@ python scripts/validate_questions.py eval/questions.regression.jsonl --corpus ev
 | 层次 | 选型 |
 |------|------|
 | 后端 | FastAPI · uvicorn · 全异步 |
-| 向量库 | ChromaDB（本地持久化） |
+| 向量库 | Qdrant（Docker 部署连独立服务；本地开发用嵌入式模式，无需起服务） |
 | 嵌入 | fastembed / BGE-small-zh（默认本地 ONNX） |
 | 检索 | 稠密向量 · BM25 · RRF 融合 · Cross-Encoder 重排 |
 | 大模型 | OpenAI 兼容接口（DashScope / Ollama 等） |

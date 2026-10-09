@@ -2,22 +2,23 @@
 """
 嵌入链路与检索测试。
 
-核心是 Bug 1 的回归防线：原实现给 collection 绑定了 ChromaDB 内置的
+核心是 Bug 1 的回归防线：原实现给 collection 绑定了当时向量库（ChromaDB）内置的
 DefaultEmbeddingFunction（384 维、纯英文的 all-MiniLM-L6-v2），而配置里的
 embedding_model 对应的 _get_embeddings() 从未被调用。结果是中文知识库
-实际用英文模型编码，检索接近随机，且改配置毫无效果。
+实际用英文模型编码，检索接近随机，且改配置毫无效果。换成 Qdrant 后同样的坑
+依然存在（qdrant-client 的 add/query 便捷方法会用内置英文模型隐式向量化）。
 
 这里从三个角度锁死这条链路：
   1. 配置/注入的 embedder 必须被真正调用
-  2. 落库向量的维度必须来自该 embedder，而不是 Chroma 的默认 384 维
-  3. 更换嵌入模型后，旧向量必须失效（重建 collection）而不是与新向量混用
+  2. 落库向量的维度必须来自该 embedder，而不是向量库内置模型的维度（384）
+  3. 更换嵌入模型后，旧向量必须失效（重建集合）而不是与新向量混用
 """
 from __future__ import annotations
 
 import pytest
 
 from embeddings import HashingEmbedder
-from rag_engine import COLLECTION_NAME, RAGEngine
+from rag_engine import RAGEngine
 
 from conftest import SpyEmbedder
 
@@ -46,38 +47,39 @@ class TestEmbedderIsActuallyUsed:
         """
         落库向量维度必须等于 embedder 的维度。
 
-        384 是 Chroma 默认 all-MiniLM-L6-v2 的维度，一旦出现 384
-        说明又退回到了内置嵌入函数。
+        384 是 all-MiniLM-L6-v2 / bge-small-en 这类向量库内置英文模型的维度，
+        一旦出现 384 说明又退回到了内置嵌入。
         """
         embedder = HashingEmbedder(dim=256)
         engine = make_engine(embedder=embedder)
         await engine.add_document(manual_text, "运维手册.md")
 
-        stored = engine._state.collection.get(limit=1, include=["embeddings"])
+        stored = engine._state.collection.get(limit=1, with_vectors=True)
 
-        assert len(stored["embeddings"][0]) == 256
-        assert len(stored["embeddings"][0]) != 384
+        assert len(stored[0].vector) == 256
+        assert len(stored[0].vector) != 384
 
     async def test_add_without_explicit_vectors_is_rejected(self, make_engine):
         """
         不带显式向量的写入必须立刻失败。
 
-        实测 chromadb 1.5.9 即使建 collection 时传了 embedding_function=None，
-        add(documents=...) 仍会静默回退到内置的 384 维英文模型，
-        既不报错也不打日志——这正是原 Bug 的成因。引擎因此在 collection 外
-        套了一层强制显式向量的代理，这条用例守住那层代理。
+        向量库自带的便捷写入（Chroma 的 add(documents=...)、qdrant-client 的
+        add(documents=...)）都会静默用内置英文模型向量化，既不报错也不打日志
+        ——这正是原 Bug 的成因。存储层只开放显式向量的写入，这条用例守住它。
         """
         engine = make_engine()
 
         with pytest.raises(ValueError, match="显式提供 embeddings"):
-            engine._state.collection.add(ids=["x"], documents=["纯文本没有向量"])
+            engine._state.collection.add(
+                ids=["x"], documents=["纯文本没有向量"], metadatas=[{}]
+            )
 
     async def test_query_by_text_is_rejected(self, make_engine):
-        """query_texts 会让 Chroma 用内置英文模型编码查询，必须禁止。"""
+        """按文本检索会让向量库用内置英文模型编码查询，必须禁止。"""
         engine = make_engine()
 
-        with pytest.raises(ValueError, match="query_embeddings"):
-            engine._state.collection.query(query_texts=["中文查询"], n_results=1)
+        with pytest.raises(ValueError, match="查询向量"):
+            engine._state.collection.search("中文查询", 1)
 
 
 class TestEmbeddingEndpointRouting:
@@ -153,14 +155,102 @@ class TestVectorSpaceCompatibility:
         assert engine_b.collection_reset_on_start is False
         assert engine_b._state.collection.count() == chunks
 
-    async def test_signature_written_to_collection_metadata(self, make_engine):
+    async def test_signature_written_to_collection_metadata(self, make_engine, manual_text):
+        """集合在首次写入时才创建（Qdrant 建集合需要先知道向量维度）。"""
         embedder = HashingEmbedder(dim=256)
         engine = make_engine(embedder=embedder)
+        assert engine._state.collection.metadata == {}
+
+        await engine.add_document(manual_text, "运维手册.md")
 
         metadata = engine._state.collection.metadata
-
         assert metadata["embedder_signature"] == embedder.signature
-        assert metadata["hnsw:space"] == "cosine"
+
+    async def test_legacy_collection_without_signature_is_reset(
+        self, shared_dir_engine, manual_text
+    ):
+        """没有指纹的集合（旧版本遗留或外部创建）一律视为不兼容。"""
+        from qdrant_client import models as qm
+
+        import config
+        import vector_store
+
+        engine_a = shared_dir_engine(HashingEmbedder(dim=256))
+        await engine_a.add_document(manual_text, "运维手册.md")
+        client = vector_store._open_handle().client
+        client.delete_collection(config.QDRANT_COLLECTION)
+        client.create_collection(
+            config.QDRANT_COLLECTION,
+            vectors_config=qm.VectorParams(size=256, distance=qm.Distance.COSINE),
+        )
+
+        engine_b = shared_dir_engine(HashingEmbedder(dim=256))
+
+        assert engine_b.collection_reset_on_start is True
+
+
+class TestVectorStoreSemantics:
+    async def test_chunk_ids_are_canonical_uuids(self, make_engine, manual_text):
+        """
+        块 ID 必须是带连字符的标准 UUID：服务端会把其它写法规范化后返回，
+        本地模式却原样保留，两种模式下 BM25 与向量召回的 ID 会对不上。
+        """
+        import uuid
+
+        engine = make_engine()
+        await engine.add_document(manual_text, "运维手册.md")
+
+        for chunk in engine._state.collection.get():
+            assert str(uuid.UUID(chunk.doc_id)) == chunk.doc_id
+
+    async def test_find_literal_is_case_sensitive_substring(self, make_engine):
+        """
+        Qdrant 的 MatchText 是分词 + 转小写匹配，这里要的是子串语义：
+        中文片段、标识符片段都要能命中，大小写不同则不命中。
+        """
+        engine = make_engine()
+        await engine.add_document(
+            "# 配置\n\n请求超时时间由 REQUEST_TIMEOUT 控制。\n", "a.md"
+        )
+
+        assert (await engine.find_literal("超时"))["total"] == 1
+        assert (await engine.find_literal("QUEST_TIME"))["total"] == 1
+        assert (await engine.find_literal("request_timeout"))["total"] == 0
+        assert (await engine.find_literal("超时", source="不存在.md"))["total"] == 0
+
+    async def test_find_literal_reports_total_beyond_limit(self, make_engine):
+        # 每段约 27 字，块长 50 时两段装不进一块，8 段恰好切成 8 块
+        engine = make_engine(chunk_size=50, chunk_overlap=0)
+        body = "\n\n".join(f"第{i}段提到 MARKER 一次，后面再补些凑长度的文字。" for i in range(8))
+        await engine.add_document(f"# 节\n\n{body}\n", "a.md")
+
+        result = await engine.find_literal("MARKER", limit=3)
+
+        assert result["total"] == 8
+        assert len(result["chunks"]) == 3
+
+    async def test_fetch_section_filters_by_source_and_heading(self, make_engine, manual_text):
+        engine = make_engine(chunk_size=200, chunk_overlap=20)
+        await engine.add_document(manual_text, "运维手册.md")
+        await engine.add_document(manual_text, "副本.md")
+        heading = engine._state.collection.get(limit=1)[0].metadata["heading"]
+
+        chunks = await engine.fetch_section("运维手册.md", heading)
+
+        assert chunks
+        assert {c["source"] for c in chunks} == {"运维手册.md"}
+        assert {c["heading"] for c in chunks} == {heading}
+        assert [c["chunk_index"] for c in chunks] == sorted(c["chunk_index"] for c in chunks)
+
+    async def test_hybrid_search_works_on_qdrant(self, make_engine, manual_text):
+        """BM25 召回的 ID 必须能在向量库里按 ID 取回正文。"""
+        engine = make_engine(hybrid_search_enabled=True, chunk_size=300, chunk_overlap=30)
+        await engine.add_document(manual_text, "运维手册.md")
+
+        result = await engine.retrieve_with_diagnostics("Python 版本要求")
+
+        assert result["stages"]["bm25_hits"] > 0
+        assert result["hits"] and all(h.text for h in result["hits"])
 
 
 class TestRetrieval:

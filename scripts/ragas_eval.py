@@ -83,6 +83,7 @@ if hasattr(sys.stdout, "reconfigure"):
 import config  # noqa: E402
 from rag_engine import RAGEngine  # noqa: E402
 from retrieval import LexicalOverlapReranker  # noqa: E402
+import vector_store  # noqa: E402
 
 # 同在 scripts/ 下，直接按模块名导入。
 # COMBOS 与 load_questions 复用 retrieval_sweep 的定义，
@@ -398,13 +399,15 @@ async def main_async(args) -> int:
     try:
         if args.corpus:
             tmp_dir = Path(tempfile.mkdtemp(prefix="ragas-eval-"))
-            config.CHROMA_DIR = tmp_dir / "chroma"
+            # 临时索引一律走本地模式：配了 QDRANT_URL 时不能把评测语料写进线上集合
+            config.QDRANT_URL = ""
+            config.QDRANT_PATH = tmp_dir / "qdrant"
             base_settings = config.load_settings()
             await build_temp_index(Path(args.corpus), base_settings, tmp_dir)
         else:
             base_settings = config.load_settings()
             if not args.samples:
-                print(f"使用现有向量库: {config.CHROMA_DIR}")
+                print(f"使用现有向量库: {config.QDRANT_URL or config.QDRANT_PATH}")
 
         base_settings["top_k"] = args.top_k
         base_settings["candidate_pool_size"] = args.pool
@@ -519,6 +522,8 @@ async def main_async(args) -> int:
         return 0
     finally:
         if tmp_dir:
+            # 本地模式持有目录锁，不先关掉 Windows 上删不掉
+            vector_store.close_all()
             shutil.rmtree(tmp_dir, ignore_errors=True)
         # Cursor 评委持有一个 bridge 子进程与沙箱目录，不关会漏进程
         if judge_llm is not None and hasattr(judge_llm, "aclose"):

@@ -81,7 +81,7 @@ def _configure_logging():
 
     trace_id 靠装在 handler 上的过滤器补齐，而不是靠调用方传。format 里一旦
     写了 %(trace_id)s，任何缺这个字段的记录都会让日志系统自己抛异常——
-    包括 httpx、chromadb 这些第三方库打的日志。
+    包括 httpx、qdrant-client 这些第三方库打的日志。
     """
     fmt = logging.Formatter(
         "%(asctime)s %(levelname)s [%(name)s] [%(trace_id)s] %(message)s"
@@ -117,7 +117,7 @@ def _configure_logging():
 
     if config.AGENT_TRACE:
         # trace 自己是 DEBUG 级的，根级别若停在 INFO 就一条都看不到。
-        # 只放开这一个 logger，不把 httpx / chromadb 的 DEBUG 一起灌进来。
+        # 只放开这一个 logger，不把 httpx / qdrant-client 的 DEBUG 一起灌进来。
         logging.getLogger("agent.trace").setLevel(logging.DEBUG)
         logging.getLogger("app").warning(
             "AGENT_TRACE 已开启：提问与文档原文会被完整写进日志，排查完请关掉。"

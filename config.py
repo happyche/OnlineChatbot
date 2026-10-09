@@ -39,7 +39,14 @@ def _path_from_env(env_key: str, default_name: str) -> Path:
 
 SETTINGS_FILE = _path_from_env("SETTINGS_FILE", "settings.json")
 UPLOADS_DIR = _path_from_env("UPLOADS_DIR", "uploads")
-CHROMA_DIR = _path_from_env("CHROMA_DIR", "chroma_db")
+
+# 向量库（Qdrant）。QDRANT_URL 非空时连接独立服务，否则用嵌入式本地模式、数据落在 QDRANT_PATH。
+# 本地模式同一目录只能被一个进程打开：多 worker 部署或想让脚本与服务同时读库，就得起服务。
+QDRANT_URL = os.getenv("QDRANT_URL", "").strip()
+QDRANT_API_KEY = os.getenv("QDRANT_API_KEY", "").strip()
+QDRANT_PATH = _path_from_env("QDRANT_PATH", "qdrant_db")
+QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "").strip() or "documents"
+QDRANT_TIMEOUT = int(os.getenv("QDRANT_TIMEOUT", "30"))
 
 # 本地模型权重放用户级缓存目录，多个项目可共享，也不会被系统清理临时目录时删掉
 DEFAULT_MODEL_CACHE = Path.home() / ".cache" / "fastembed"
@@ -232,7 +239,7 @@ ADMIN_ENABLED = _flag("ADMIN_ENABLED", False)
 # 这三项刻意不进 DEFAULTS：DEFAULTS 里的配置可以从界面热改，
 # 而日志要在第一行代码跑起来之前就定下来，改它必须重启才有意义。
 #
-# LOG_LEVEL 设成 DEBUG 会把 httpx 每次请求、chromadb 的内部动作也一起打出来，
+# LOG_LEVEL 设成 DEBUG 会把 httpx 每次请求、qdrant-client 的内部动作也一起打出来，
 # 量很大；排查具体问题时更常用的是保持 INFO、单独打开 AGENT_TRACE。
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 # 日志文件路径。留空只输出到控制台——控制台一关就什么都没有了，

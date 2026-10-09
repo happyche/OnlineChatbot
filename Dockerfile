@@ -34,7 +34,7 @@ RUN mkdir -p /app/models \
     && python scripts/download_model.py --cache-dir /app/models --reranker --retries 5
 
 ENV UPLOADS_DIR=/data/uploads \
-    CHROMA_DIR=/data/chroma_db \
+    QDRANT_PATH=/data/qdrant_db \
     SETTINGS_FILE=/data/settings.json \
     HOST=0.0.0.0 \
     PORT=8000 \

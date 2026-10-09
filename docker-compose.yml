@@ -20,11 +20,17 @@ services:
       PORT: 8000
       EMBEDDING_CACHE_DIR: /app/models
       UPLOADS_DIR: /data/uploads
-      CHROMA_DIR: /data/chroma_db
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_API_KEY: ${QDRANT_API_KEY:-}
+      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-documents}
       SETTINGS_FILE: /data/settings.json
       # 反馈库必须落在挂载卷上，否则容器一重建，攒下来的 badcase 全没了
       FEEDBACK_DB: /data/feedback.db
       FEEDBACK_ENABLED: ${FEEDBACK_ENABLED:-true}
+      # 会话库同理落卷。⚠️ 开关默认关闭，关着时这个文件不会被创建；
+      # 打开 AGENT_SESSION_ENABLED 等于把对话原文写进这个卷
+      AGENT_SESSION_DB: /data/sessions.db
+      AGENT_SESSION_ENABLED: ${AGENT_SESSION_ENABLED:-false}
       # 结构化请求日志同样落卷。容器的 stdout 会被日志驱动截断/轮转，
       # 而这份数据是要用 jq 事后翻的
       REQUEST_LOG_FILE: /data/requests.jsonl
@@ -46,8 +52,10 @@ services:
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8000,http://127.0.0.1:8000}
     volumes:
       - chatbot-uploads:/data/uploads
-      - chatbot-chroma:/data/chroma_db
       - chatbot-settings:/data
+    depends_on:
+      qdrant:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/health"]
@@ -56,7 +64,24 @@ services:
       retries: 3
       start_period: 90s
 
+  qdrant:
+    image: qdrant/qdrant:v1.19.2
+    # 只绑本机：Web 控制台 http://127.0.0.1:6333/dashboard 方便排障，但不对外暴露。
+    # 默认无鉴权，要开的话加 QDRANT__SERVICE__API_KEY，并给 chatbot 配同值的 QDRANT_API_KEY
+    ports:
+      - "127.0.0.1:${QDRANT_PORT:-6333}:6333"
+    volumes:
+      - qdrant-storage:/qdrant/storage
+    restart: unless-stopped
+    healthcheck:
+      # 镜像里没有 curl/wget，用 bash 的 /dev/tcp 探测端口
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
 volumes:
   chatbot-uploads:
-  chatbot-chroma:
   chatbot-settings:
+  qdrant-storage:

@@ -4,15 +4,15 @@ RAG（检索增强生成）引擎
 =======================
 职责：
   1. 把 Markdown 文档按标题层级切分成带重叠的文本块
-  2. 用配置指定的嵌入模型向量化，存入 ChromaDB，按余弦相似度检索
+  2. 用配置指定的嵌入模型向量化，存入 Qdrant，按余弦相似度检索
   3. 组装上下文并通过 OpenAI 兼容接口流式生成回答
 
 几个关键设计：
 
 **向量空间指纹**
-  collection 元数据里记录产出这批向量的 embedder signature。换了嵌入模型后
+  集合元数据里记录产出这批向量的 embedder signature。换了嵌入模型后
   旧向量与新查询向量既不在同一语义空间、维度也不同，检索结果毫无意义，
-  因此启动时检测到 signature 不匹配就重建 collection，并提示重新索引。
+  因此启动时检测到 signature 不匹配就重建集合，并提示重新索引。
 
 **状态快照**
   settings / client / embedder / collection 打包成不可变的 _EngineState。
@@ -21,7 +21,7 @@ RAG（检索增强生成）引擎
 
 **全异步**
   嵌入和生成都是网络 IO，同步调用会阻塞事件循环，导致并发请求被串行化。
-  ChromaDB 本身是同步的本地库，其调用丢到线程池执行。
+  qdrant-client 是同步客户端，其调用丢到线程池执行。
 """
 from __future__ import annotations
 
@@ -30,10 +30,10 @@ import hashlib
 import logging
 import re
 import time
+import uuid
 from dataclasses import dataclass
 from typing import AsyncIterator, Optional
 
-import chromadb
 from openai import AsyncOpenAI
 
 import config
@@ -41,6 +41,7 @@ from embeddings import Embedder, build_embedder
 from observability import estimate_tokens
 from query_rewrite import resolve_search_query
 from retrieval import BM25Index, Reranker, build_reranker, reciprocal_rank_fusion
+from vector_store import StoredChunk, VectorStore
 
 logger = logging.getLogger(__name__)
 
@@ -52,9 +53,7 @@ logger = logging.getLogger(__name__)
 #: 也比为了保守而永远不要用量更有用。
 _NO_STREAM_USAGE: set[str] = set()
 
-COLLECTION_NAME = "documents"
-
-#: collection 元数据中记录向量空间指纹的键名
+#: 集合元数据中记录向量空间指纹的键名
 _SIGNATURE_KEY = "embedder_signature"
 
 #: Markdown 标题行
@@ -80,50 +79,8 @@ class _EngineState:
     embedder: Embedder
     #: 未启用重排时为 None
     reranker: Optional[Reranker]
-    collection: object
+    collection: VectorStore
     collection_reset: bool
-
-
-class _ExplicitVectorCollection:
-    """
-    ChromaDB collection 的薄代理，强制所有写入与检索都显式提供向量。
-
-    这一层不是洁癖，是防止 Bug 复发的硬约束。实测 chromadb 1.5.9 的行为：
-    即使创建 collection 时传了 embedding_function=None，调用
-    add(documents=...) 而不给 embeddings、或 query(query_texts=...) 时，
-    Chroma 依然会静默回退到内置的 all-MiniLM-L6-v2（384 维、纯英文）自动向量化，
-    既不报错也不打日志。
-
-    这正是本项目原先「配置的嵌入模型从未生效、中文检索接近随机」的根因。
-    把隐式路径直接封死，将来任何漏传向量的调用都会立即失败而不是悄悄降级。
-    """
-
-    def __init__(self, inner):
-        self._inner = inner
-
-    def add(self, *, ids, embeddings=None, documents=None, metadatas=None, **kwargs):
-        if embeddings is None:
-            raise ValueError(
-                "写入向量库必须显式提供 embeddings；"
-                "省略会导致 Chroma 静默使用内置英文模型向量化。"
-            )
-        return self._inner.add(
-            ids=ids, embeddings=embeddings, documents=documents, metadatas=metadatas, **kwargs
-        )
-
-    def query(self, *, query_embeddings=None, query_texts=None, **kwargs):
-        if query_texts is not None:
-            raise ValueError(
-                "检索必须使用 query_embeddings；query_texts 会让 Chroma "
-                "用内置英文模型编码查询，与库中向量不在同一语义空间。"
-            )
-        if query_embeddings is None:
-            raise ValueError("检索必须显式提供 query_embeddings。")
-        return self._inner.query(query_embeddings=query_embeddings, **kwargs)
-
-    def __getattr__(self, name):
-        # get / delete / count / metadata 等只读或无嵌入语义的成员直接透传
-        return getattr(self._inner, name)
 
 
 @dataclass
@@ -186,8 +143,6 @@ class RAGEngine:
                        即可完全离线运行，不依赖网络与 API Key。
             reranker : 注入的重排实现，默认按配置构造。注入时无需下载模型权重。
         """
-        config.CHROMA_DIR.mkdir(parents=True, exist_ok=True)
-        self._chroma = chromadb.PersistentClient(path=str(config.CHROMA_DIR))
         self._injected_embedder = embedder
         self._injected_reranker = reranker
         # BM25 索引按需构建，文档或分词器变化时置空重建
@@ -257,7 +212,10 @@ class RAGEngine:
                     embed_client = self._make_client(embed, settings, timeout)
             embedder = build_embedder(settings, embed_client)
 
-        collection, was_reset = self._ensure_collection(embedder.signature)
+        # 与当前嵌入模型不兼容的旧集合会被删除（向量空间不同，无法与新查询向量比较）
+        collection, was_reset = VectorStore.open(
+            config.QDRANT_COLLECTION, embedder.signature, _SIGNATURE_KEY
+        )
         return _EngineState(
             settings=settings,
             client=client,
@@ -268,43 +226,6 @@ class RAGEngine:
             collection=collection,
             collection_reset=was_reset,
         )
-
-    def _ensure_collection(self, signature: str):
-        """
-        取得与当前嵌入模型匹配的 collection。
-
-        若已存在的 collection 是别的嵌入模型建的（signature 不同或缺失），
-        其向量无法与新查询向量比较，只能删除重建。
-
-        返回 (collection, 是否发生了重建)。
-        """
-        existing = None
-        try:
-            # 显式传 None 可以去掉 Python 侧的默认嵌入函数（该参数默认值就是
-            # DefaultEmbeddingFunction()）。但这还不够：Chroma 底层仍会在缺少
-            # 显式向量时回退到内置英文模型，因此外面还要再套 _ExplicitVectorCollection。
-            existing = self._chroma.get_collection(COLLECTION_NAME, embedding_function=None)
-        except Exception:
-            existing = None
-
-        if existing is not None:
-            current = (existing.metadata or {}).get(_SIGNATURE_KEY)
-            if current == signature:
-                return _ExplicitVectorCollection(existing), False
-            logger.warning(
-                "向量库由 %s 构建，当前嵌入模型为 %s，向量空间不兼容，已重建 collection。"
-                "请调用 /api/reindex 重新索引 uploads/ 下的文档。",
-                current or "未知模型(旧版本遗留)",
-                signature,
-            )
-            self._chroma.delete_collection(COLLECTION_NAME)
-
-        collection = self._chroma.create_collection(
-            name=COLLECTION_NAME,
-            metadata={"hnsw:space": "cosine", _SIGNATURE_KEY: signature},
-            embedding_function=None,
-        )
-        return _ExplicitVectorCollection(collection), existing is not None
 
     def reload_settings(self) -> dict:
         """
@@ -406,9 +327,14 @@ class RAGEngine:
             units = self._split_oversized_units(body, chunk_size)
             for piece in self._pack_units(units, chunk_size, chunk_overlap):
                 idx = len(results)
-                doc_id = hashlib.md5(
-                    f"{filename}:{idx}:{heading}:{piece[:50]}".encode("utf-8")
-                ).hexdigest()
+                # Qdrant 只接受 UUID / 整数 ID，md5 恰好 128 位，按 UUID 格式输出
+                doc_id = str(
+                    uuid.UUID(
+                        hex=hashlib.md5(
+                            f"{filename}:{idx}:{heading}:{piece[:50]}".encode("utf-8")
+                        ).hexdigest()
+                    )
+                )
                 results.append(
                     {
                         "id": doc_id,
@@ -570,42 +496,33 @@ class RAGEngine:
         删除失败而新块照样写入会导致同一文档的新旧版本同时留在库里，
         检索时混杂返回。
         """
-        collection = self._state.collection
-        existing = collection.get(where={"source": filename})
-        if existing["ids"]:
-            collection.delete(ids=existing["ids"])
+        removed = self._state.collection.delete(where={"source": filename})
+        if removed:
             self._bm25 = None
-            logger.info("已删除 %s 的 %d 个文本块", filename, len(existing["ids"]))
+            logger.info("已删除 %s 的 %d 个文本块", filename, removed)
 
     def list_documents(self) -> list[dict]:
         """列出已入库的文档及其文本块数量。"""
-        results = self._state.collection.get(include=["metadatas"])
         counts: dict[str, int] = {}
-        for meta in results["metadatas"] or []:
-            source = meta.get("source")
+        for chunk in self._state.collection.get(with_text=False):
+            source = chunk.metadata.get("source")
             if source:
                 counts[source] = counts.get(source, 0) + 1
         return [{"filename": k, "chunks": v} for k, v in sorted(counts.items())]
 
     @staticmethod
-    def _as_chunks(raw: dict) -> list[dict]:
-        """把 Chroma 的 get 结果整理成按 (source, chunk_index) 排序的块列表。"""
-        out: list[dict] = []
-        for doc_id, text, meta in zip(
-            raw.get("ids") or [],
-            raw.get("documents") or [],
-            raw.get("metadatas") or [],
-        ):
-            meta = meta or {}
-            out.append(
-                {
-                    "doc_id": doc_id,
-                    "text": text,
-                    "source": meta.get("source", "未知来源"),
-                    "heading": meta.get("heading", ""),
-                    "chunk_index": int(meta.get("chunk_index", 0)),
-                }
-            )
+    def _as_chunks(raw: list[StoredChunk]) -> list[dict]:
+        """把向量库记录整理成按 (source, chunk_index) 排序的块列表。"""
+        out = [
+            {
+                "doc_id": c.doc_id,
+                "text": c.text,
+                "source": c.metadata.get("source", "未知来源"),
+                "heading": c.metadata.get("heading", ""),
+                "chunk_index": int(c.metadata.get("chunk_index", 0)),
+            }
+            for c in raw
+        ]
         out.sort(key=lambda c: (c["source"], c["chunk_index"]))
         return out
 
@@ -625,16 +542,8 @@ class RAGEngine:
         heading 为空则取整篇文档，用于章节名匹配失败时的兜底——
         范围限定在单篇文档内，量级可控。
         """
-        where: dict = (
-            {"$and": [{"source": source}, {"heading": heading}]}
-            if heading
-            else {"source": source}
-        )
-        raw = await asyncio.to_thread(
-            self._state.collection.get,
-            where=where,
-            include=["documents", "metadatas"],
-        )
+        where: dict = {"source": source, "heading": heading} if heading else {"source": source}
+        raw = await asyncio.to_thread(self._state.collection.get, where=where)
         return self._as_chunks(raw)
 
     async def document_exists(self, source: str) -> bool:
@@ -649,9 +558,9 @@ class RAGEngine:
             self._state.collection.get,
             where={"source": source},
             limit=1,
-            include=[],
+            with_text=False,
         )
-        return bool(raw.get("ids"))
+        return bool(raw)
 
     async def find_literal(
         self, text: str, source: Optional[str] = None, limit: int = 40
@@ -662,36 +571,24 @@ class RAGEngine:
         存在的理由是「所有出现 X 的地方」这类要求列全的问题：
         检索按相似度返回 top_k，会**悄悄截断**且不会提示还有更多。
 
-        匹配下推给 Chroma 的 `where_document={"$contains": ...}`，
-        不在 Python 里做全库正则扫描。两个由此而来的性质必须说清楚：
+        文档过滤下推给向量库，子串判断在本进程内做（Qdrant 的全文匹配是分词匹配，
+        对中文和标识符片段都不是子串语义，原因见 VectorStore.find_contains）。
+        两个由此而来的性质必须说清楚：
 
         - **大小写敏感**。对 `REQUEST_TIMEOUT`、`nokia-imshss` 这类技术标识符
           正好是想要的行为。
-        - **只匹配正文，不匹配标题**。Chroma 里存的 document 不含标题
+        - **只匹配正文，不匹配标题**。库里存的正文不含标题
           （标题只进 metadata，见 2.2）。这不是缺陷：标题本来就参与向量化，
           按章节名查找是 `retrieve` 的职责，这里专管正文里的精确串。
 
-        先用只取 id 的查询拿到命中总数，再按 limit 取回正文——
-        这样「命中 137 处，展示前 40 处」里的 137 是真实数字，
-        而不是一个被 limit 截断后没人说得清的数。
+        总数是遍历全部候选数出来的，「命中 137 处，展示前 40 处」里的 137
+        是真实数字，而不是一个被 limit 截断后没人说得清的数。
         """
         where = {"source": source} if source else None
-        matched = await asyncio.to_thread(
-            self._state.collection.get,
-            where=where,
-            where_document={"$contains": text},
-            include=[],
+        total, raw = await asyncio.to_thread(
+            self._state.collection.find_contains, text, where, max(1, limit)
         )
-        ids = list(matched.get("ids") or [])
-        if not ids:
-            return {"total": 0, "chunks": []}
-
-        raw = await asyncio.to_thread(
-            self._state.collection.get,
-            ids=ids[: max(1, limit)],
-            include=["documents", "metadatas"],
-        )
-        return {"total": len(ids), "chunks": self._as_chunks(raw)}
+        return {"total": total, "chunks": self._as_chunks(raw)}
 
     async def reindex(self) -> list[dict]:
         """
@@ -722,38 +619,24 @@ class RAGEngine:
         """
         向量检索。
 
-        Chroma 在 cosine 空间返回的 distance = 1 - 余弦相似度，
-        因此用 1 - distance 还原相似度，并按 min_similarity 过滤，
-        避免把明显无关的内容塞进上下文污染生成。
+        Qdrant 的 Cosine 距离直接返回余弦相似度（越大越相似），
+        按 min_similarity 过滤，避免把明显无关的内容塞进上下文污染生成。
         """
         query_vector = await state.embedder.embed_query(question)
-        raw = await asyncio.to_thread(
-            state.collection.query,
-            query_embeddings=[query_vector],
-            n_results=limit,
-            include=["documents", "metadatas", "distances"],
-        )
-        if not raw["documents"] or not raw["documents"][0]:
-            return []
+        raw = await asyncio.to_thread(state.collection.search, query_vector, limit)
 
         threshold = float(state.settings.get("min_similarity", 0.0))
-        out: list[_Candidate] = []
-        for doc_id, text, meta, distance in zip(
-            raw["ids"][0], raw["documents"][0], raw["metadatas"][0], raw["distances"][0]
-        ):
-            similarity = 1.0 - float(distance)
-            if similarity < threshold:
-                continue
-            out.append(
-                _Candidate(
-                    doc_id=doc_id,
-                    text=text,
-                    source=(meta or {}).get("source", "未知来源"),
-                    heading=(meta or {}).get("heading", ""),
-                    vector_similarity=similarity,
-                )
+        return [
+            _Candidate(
+                doc_id=c.doc_id,
+                text=c.text,
+                source=c.metadata.get("source", "未知来源"),
+                heading=c.metadata.get("heading", ""),
+                vector_similarity=c.similarity,
             )
-        return out
+            for c in raw
+            if c.similarity >= threshold
+        ]
 
     @staticmethod
     def _bm25_document_text(doc: str, meta: dict) -> str:
@@ -765,7 +648,7 @@ class RAGEngine:
         """
         取得与当前语料和分词器匹配的 BM25 索引，必要时重建。
 
-        索引不做持久化：文本本身已存在 ChromaDB 中，随用随建可以彻底避免
+        索引不做持久化：文本本身已存在向量库中，随用随建可以彻底避免
         「两套数据不一致」的问题；分词是 CPU 密集操作，放线程池执行。
         """
         tokenizer_name = state.settings.get("bm25_tokenizer", "jieba")
@@ -773,14 +656,9 @@ class RAGEngine:
         if index is not None and index.ready and index.tokenizer_name == tokenizer_name:
             return index
 
-        data = await asyncio.to_thread(
-            state.collection.get, include=["documents", "metadatas"]
-        )
-        ids = data["ids"] or []
-        texts = [
-            self._bm25_document_text(doc, meta)
-            for doc, meta in zip(data["documents"] or [], data["metadatas"] or [])
-        ]
+        data = await asyncio.to_thread(state.collection.get)
+        ids = [c.doc_id for c in data]
+        texts = [self._bm25_document_text(c.text, c.metadata) for c in data]
 
         def _build() -> BM25Index:
             fresh = BM25Index(tokenizer_name)
@@ -797,20 +675,16 @@ class RAGEngine:
         """按 id 补齐候选内容（用于 BM25 命中但向量没召回的文档）。"""
         if not doc_ids:
             return {}
-        data = await asyncio.to_thread(
-            state.collection.get, ids=doc_ids, include=["documents", "metadatas"]
-        )
-        out: dict[str, _Candidate] = {}
-        for doc_id, text, meta in zip(
-            data["ids"] or [], data["documents"] or [], data["metadatas"] or []
-        ):
-            out[doc_id] = _Candidate(
-                doc_id=doc_id,
-                text=text,
-                source=(meta or {}).get("source", "未知来源"),
-                heading=(meta or {}).get("heading", ""),
+        data = await asyncio.to_thread(state.collection.get, ids=doc_ids)
+        return {
+            c.doc_id: _Candidate(
+                doc_id=c.doc_id,
+                text=c.text,
+                source=c.metadata.get("source", "未知来源"),
+                heading=c.metadata.get("heading", ""),
             )
-        return out
+            for c in data
+        }
 
     async def _apply_rerank(
         self, state: _EngineState, question: str, candidates: list[_Candidate]

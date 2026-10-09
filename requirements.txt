@@ -1,15 +1,17 @@
 # Python 3.10+ required
-# RAG Chatbot: FastAPI + ChromaDB + 本地/远程嵌入 + Qwen（OpenAI 兼容接口）
+# RAG Chatbot: FastAPI + Qdrant + 本地/远程嵌入 + Qwen（OpenAI 兼容接口）
 fastapi>=0.110.0
 uvicorn[standard]>=0.29.0
 python-multipart>=0.0.9
 python-dotenv>=1.0.0
 openai>=1.0.0
-chromadb>=0.5.0
+# 向量库客户端。既能连 Qdrant 服务，也自带嵌入式本地模式（开发/测试无需起服务）。
+# 1.16+ 才支持集合元数据，嵌入模型指纹存在那里。
+qdrant-client>=1.16.0
 
 # 本地嵌入与重排模型（ONNX 推理）。
 # 选 fastembed 而非 sentence-transformers：后者依赖 PyTorch（Windows 上数百 MB 起），
-# fastembed 只需 onnxruntime，而 chromadb 已将其作为依赖装好。
+# fastembed 只需 onnxruntime，体积小得多。
 fastembed>=0.8.0
 
 # 混合检索：BM25 稀疏检索 + 中文分词。

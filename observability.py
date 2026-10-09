@@ -68,7 +68,7 @@ class TraceIdFilter(logging.Filter):
     给每条日志补上 trace_id 字段。
 
     装在 handler 上而不是某个 logger 上：format 里一旦写了 %(trace_id)s，
-    **任何**缺这个字段的记录都会让日志系统自己抛异常——包括 httpx、chromadb
+    **任何**缺这个字段的记录都会让日志系统自己抛异常——包括 httpx、qdrant-client
     这些第三方库打的日志。装在 handler 上可以覆盖所有流经它的记录。
     """
 

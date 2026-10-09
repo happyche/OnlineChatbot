@@ -4,7 +4,7 @@
 ==========================
 把「文本 → 向量」这一步从 RAG 引擎里剥离出来，原因有三：
 
-  1. 修复原实现的缺陷：原来 collection 绑定了 ChromaDB 的 DefaultEmbeddingFunction
+  1. 修复原实现的缺陷：原来 collection 绑定了当时向量库 ChromaDB 的 DefaultEmbeddingFunction
      （纯英文的 all-MiniLM-L6-v2），配置里的 embedding_model 从未生效，
      中文文档实际上是用英文模型编码的，检索质量接近随机。
   2. 可注入：测试时传入一个确定性的假 embedder，不需要网络和 API Key。
@@ -57,8 +57,7 @@ class LocalEmbedder(Embedder):
     本地嵌入模型，通过 fastembed 做 ONNX 推理。
 
     选 fastembed 而不是 sentence-transformers 的原因：后者依赖 PyTorch，
-    在 Windows 上要额外装几百 MB 到 2GB；fastembed 只需 onnxruntime，
-    而 ChromaDB 已经把它作为依赖装好了，等于零额外重量。
+    在 Windows 上要额外装几百 MB 到 2GB；fastembed 只需 onnxruntime，体积小得多。
 
     默认模型 BAAI/bge-small-zh-v1.5 约 90MB、512 维，中文检索质量足够，
     且输出已 L2 归一化，可直接用余弦相似度比较。

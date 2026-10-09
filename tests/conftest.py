@@ -15,6 +15,7 @@ import os
 import shutil
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -22,8 +23,6 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 _TMP_ROOT = Path(tempfile.mkdtemp(prefix="onlinechatbot-tests-"))
 
-# 关掉 Chroma 匿名遥测，避免测试期间产生外部网络请求
-os.environ["ANONYMIZED_TELEMETRY"] = "False"
 # 确定性嵌入：离线、可复现
 os.environ["EMBEDDING_PROVIDER"] = "hashing"
 os.environ["LLM_API_KEY"] = "test-key-not-a-real-credential"
@@ -40,7 +39,12 @@ os.environ["AGENT_SESSION_DB"] = str(_TMP_ROOT / "sessions.db")
 # 指向临时目录，避免污染开发者本地的向量库、上传文件和配置
 os.environ["SETTINGS_FILE"] = str(_TMP_ROOT / "settings.json")
 os.environ["UPLOADS_DIR"] = str(_TMP_ROOT / "uploads")
-os.environ["CHROMA_DIR"] = str(_TMP_ROOT / "chroma")
+os.environ["QDRANT_PATH"] = str(_TMP_ROOT / "qdrant")
+# 默认用嵌入式本地模式：开发者 .env 里的 QDRANT_URL 若指向真实服务，
+# 测试会往那个库里写数据、还会删它的集合。
+# 要验证服务端模式，显式设 TEST_QDRANT_URL 指向一个**一次性**的 Qdrant 实例，
+# 每个用例用随机集合名隔离，跑完不清理。
+os.environ["QDRANT_URL"] = os.getenv("TEST_QDRANT_URL", "").strip()
 os.environ["APP_API_TOKEN"] = ""
 # 测试要覆盖文档上传、模型配置这些管理接口，而它们默认不注册（给使用者的
 # 部署里是 404）。这个开关在 main 导入时就决定了 router 装不装，
@@ -68,6 +72,10 @@ MANUAL_PATH = FIXTURE_DIR / "运维手册.md"
 
 def pytest_sessionfinish(session, exitstatus):
     """会话结束后清理临时目录。"""
+    import vector_store
+
+    # 先释放本地模式的文件锁，否则 Windows 上目录删不掉
+    vector_store.close_all()
     shutil.rmtree(_TMP_ROOT, ignore_errors=True)
 
 
@@ -76,7 +84,7 @@ class SpyEmbedder(Embedder):
     包装真实 embedder 并记录调用次数。
 
     用于验证「引擎确实使用了注入/配置的 embedder」——原实现中 collection
-    绑定了 Chroma 内置嵌入函数，配置的模型从未被调用，这个 spy 就是那条链路的回归防线。
+    绑定了向量库内置嵌入函数，配置的模型从未被调用，这个 spy 就是那条链路的回归防线。
     """
 
     def __init__(self, inner: Embedder | None = None):
@@ -94,6 +102,13 @@ class SpyEmbedder(Embedder):
     async def embed_query(self, text):
         self.query_calls += 1
         return await self._inner.embed_query(text)
+
+
+def _isolate_vector_store(monkeypatch, path: Path) -> None:
+    """让接下来构造的引擎用一份独立的向量库：本地模式换目录，服务端模式换集合名。"""
+    monkeypatch.setattr(config, "QDRANT_PATH", path)
+    if config.QDRANT_URL:
+        monkeypatch.setattr(config, "QDRANT_COLLECTION", f"test-{uuid.uuid4().hex[:12]}")
 
 
 @pytest.fixture(autouse=True)
@@ -151,8 +166,7 @@ def make_engine(tmp_path, monkeypatch):
         reranker 可注入，避免测试依赖 1GB 的交叉编码器权重。
         """
         counter["n"] += 1
-        chroma_dir = tmp_path / f"chroma-{counter['n']}"
-        monkeypatch.setattr(config, "CHROMA_DIR", chroma_dir)
+        _isolate_vector_store(monkeypatch, tmp_path / f"qdrant-{counter['n']}")
         settings = config.load_settings()
         settings.update(overrides)
         if use_config_embedder:
@@ -174,8 +188,7 @@ def shared_dir_engine(tmp_path, monkeypatch):
     用于验证「更换嵌入模型后向量库被重建」这一行为，
     需要两个引擎先后打开同一份持久化数据。
     """
-    chroma_dir = tmp_path / "chroma-shared"
-    monkeypatch.setattr(config, "CHROMA_DIR", chroma_dir)
+    _isolate_vector_store(monkeypatch, tmp_path / "qdrant-shared")
 
     def _make(embedder: Embedder, **overrides) -> RAGEngine:
         settings = config.load_settings()
@@ -195,7 +208,7 @@ def client(tmp_path, monkeypatch):
     """
     from fastapi.testclient import TestClient
 
-    monkeypatch.setattr(config, "CHROMA_DIR", tmp_path / "chroma-api")
+    _isolate_vector_store(monkeypatch, tmp_path / "qdrant-api")
     monkeypatch.setattr(config, "UPLOADS_DIR", tmp_path / "uploads-api")
     config.UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 

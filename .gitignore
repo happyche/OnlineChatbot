@@ -15,6 +15,7 @@ settings.json
 
 # ---- 运行时数据 ----
 chroma_db/
+qdrant_db/
 uploads/
 *.log
 # 反馈库：含提问、答案与文档原文，和 .env 同一类东西，绝不能进仓库

@@ -13,6 +13,7 @@ htmlcov/
 .env.*
 settings.json
 chroma_db/
+qdrant_db/
 uploads/
 *.log
 

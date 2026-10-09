@@ -54,6 +54,7 @@ if hasattr(sys.stdout, "reconfigure"):
 import config  # noqa: E402
 from rag_engine import RAGEngine  # noqa: E402
 from retrieval import LexicalOverlapReranker  # noqa: E402
+import vector_store  # noqa: E402
 
 #: 默认扫描的开关组合
 COMBOS: dict[str, dict] = {
@@ -232,12 +233,14 @@ async def main_async(args) -> int:
     try:
         if args.corpus:
             tmp_dir = Path(tempfile.mkdtemp(prefix="retrieval-sweep-"))
-            config.CHROMA_DIR = tmp_dir / "chroma"
+            # 临时索引一律走本地模式：配了 QDRANT_URL 时不能把评测语料写进线上集合
+            config.QDRANT_URL = ""
+            config.QDRANT_PATH = tmp_dir / "qdrant"
             base_settings = config.load_settings()
             await build_temp_index(Path(args.corpus), base_settings, tmp_dir)
         else:
             base_settings = config.load_settings()
-            print(f"使用现有向量库: {config.CHROMA_DIR}")
+            print(f"使用现有向量库: {config.QDRANT_URL or config.QDRANT_PATH}")
 
         base_settings["top_k"] = args.top_k
         base_settings["candidate_pool_size"] = args.pool
@@ -264,6 +267,8 @@ async def main_async(args) -> int:
         return 0
     finally:
         if tmp_dir:
+            # 本地模式持有目录锁，不先关掉 Windows 上删不掉
+            vector_store.close_all()
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
