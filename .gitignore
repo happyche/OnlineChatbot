@@ -35,6 +35,8 @@ eval/questions.hss.jsonl
 eval/sweep_*.jsonl
 eval/ragas_*.jsonl
 eval/ragas_*report.md
+eval/decision_*.json
+eval/decision_*.log
 eval/samples*.jsonl
 eval/scored_*.jsonl
 eval/*_results.jsonl
