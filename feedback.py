@@ -47,7 +47,7 @@ VERDICTS = ("up", "down")
 
 #: 👎 的预置原因。做成固定选项而不是纯自由文本，是为了让它可以直接聚合——
 #: 「本月 62% 的差评是答案不全」这种结论无法从自由文本里算出来。
-#: 每一项都对应一类已知的失败模式（见 design_LangChainAgent.md 1.1）。
+#: 每一项都对应一类已知的失败模式（见 docs/design_LangChainAgent.md 1.1）。
 REASONS = {
     "incomplete": "答案不全（漏了内容）",
     "wrong": "答案错误",

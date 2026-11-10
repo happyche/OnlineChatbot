@@ -8,7 +8,7 @@
 
     用户点 👎  →  feedback.db  →  本脚本  →  questions.jsonl  →  既有评测链路
 
-产出的格式就是 `eval/questions.*.jsonl`（见 design_LangChainAgent.md 12.7），
+产出的格式就是 `eval/questions.*.jsonl`（见 docs/design_LangChainAgent.md 12.7），
 因此 `agent_eval.py` / `ragas_eval.py` / `validate_questions.py` 一行都不用改。
 
 **导出的题目是半成品，这是有意的。** `ground_truth` 一律留空，因为它只能由人

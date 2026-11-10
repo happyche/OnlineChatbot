@@ -445,7 +445,7 @@ async def test_取材一轮后作答的完整事件序列(engine):
 
 async def test_模型如实报了用量时累计进stages(engine):
     """
-    design_LangChainAgent.md 15.5 记的正是这条缺口：端点返回了 usage，
+    docs/design_LangChainAgent.md 15.5 记的正是这条缺口：端点返回了 usage，
     但服务端没把它累计起来，于是「一次问答多少钱」答不出来。
     """
     runner = make_runner(
